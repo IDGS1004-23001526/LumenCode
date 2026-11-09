@@ -1,4 +1,4 @@
-# Lumen
+# LumenCode
 
 Editor de código minimalista y nativo, hecho con **Tauri 2** (backend en Rust, sin Electron) y **CodeMirror 6** como motor de edición.
 
