@@ -1,0 +1,211 @@
+/* ==========================================================================
+   Lumen — estilos
+   Toda la paleta vive en :root. Cambia estos valores para re-tematizar.
+   ========================================================================== */
+
+:root {
+  --bg: #0e1013;
+  --surface: #14171c;
+  --surface-2: #1b1f26;
+  --border: #20242c;
+
+  --fg: #d7dae0;
+  --fg-muted: #8b919d;
+  --fg-faint: #4f5562;
+
+  --accent: #a393ff;
+  --accent-soft: #6f63b8;
+  --selection: rgba(163, 147, 255, 0.22);
+  --selection-soft: rgba(163, 147, 255, 0.12);
+  --line-active: rgba(255, 255, 255, 0.025);
+
+  --syn-keyword: #c4a7ff;
+  --syn-string: #9ad5a6;
+  --syn-number: #f0b27a;
+  --syn-function: #8fb8ff;
+  --syn-type: #f2d48a;
+  --syn-property: #e6a3b8;
+
+  --font-ui: "Inter Variable", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --titlebar-h: 42px;
+  --statusbar-h: 28px;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  user-select: none;
+}
+
+#app {
+  display: grid;
+  grid-template-rows: var(--titlebar-h) 1fr var(--statusbar-h);
+  height: 100vh;
+}
+
+/* ---- Barra de título ---------------------------------------------------- */
+
+.titlebar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-left: 16px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--fg-muted);
+}
+
+.brand-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 12px var(--accent-soft);
+}
+
+/* Título centrado sin importar el ancho de los lados */
+.doc-title {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-muted);
+  font-size: 12.5px;
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  gap: 2px;
+}
+
+.divider {
+  width: 1px;
+  height: 16px;
+  margin: 0 8px;
+  background: var(--border);
+}
+
+button {
+  font-family: inherit;
+  border: 0;
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: default;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+button.ghost {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 7px;
+  font-size: 12px;
+}
+
+button.ghost:hover {
+  background: var(--surface-2);
+  color: var(--fg);
+}
+
+button.win {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 100%;
+}
+
+button.win:hover {
+  background: var(--surface-2);
+  color: var(--fg);
+}
+
+button.win.close:hover {
+  background: #e5484d;
+  color: #fff;
+}
+
+/* ---- Editor ------------------------------------------------------------- */
+
+#editor {
+  min-height: 0;
+  user-select: text;
+}
+
+#editor .cm-editor {
+  height: 100%;
+}
+
+/* ---- Barra de estado ---------------------------------------------------- */
+
+.statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  color: var(--fg-faint);
+  font-size: 11.5px;
+}
+
+.statusbar .left,
+.statusbar .right {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.dirty {
+  color: var(--accent);
+}
+
+/* ---- Scrollbars discretas ---------------------------------------------- */
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--surface-2);
+  border-radius: 10px;
+  border: 2px solid var(--bg);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--fg-faint);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
