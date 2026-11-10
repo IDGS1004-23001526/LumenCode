@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { TerminalPort, TerminalResult } from "../application/ports";
 import { fileNameOf } from "../domain/path";
 
@@ -15,6 +16,11 @@ interface RustTerminalOutput {
     code: number;
 }
 
+interface StreamPayload {
+    text: string;
+    is_err: boolean;
+}
+
 function guessOn(): "windows" | "macos" | "linux" {
     const ua = navigator.userAgent.toLowerCase();
     if (ua.includes("win")) return "windows";
@@ -26,11 +32,16 @@ export class NativeTerminal implements TerminalPort {
     cwd: string;
     os: "windows" | "macos" | "linux";
     shell: string;
+    private listener?: (line: string, isErr: boolean) => void;
 
     constructor() {
         this.os = guessOn();
         this.cwd = this.os === "windows" ? "C:\\" : "/";
         this.shell = this.os === "windows" ? "powershell.exe" : this.os === "macos" ? "/bin/zsh" : "/bin/bash";
+
+        void listen<StreamPayload>("terminal:line", (ev) => {
+            this.listener?.(ev.payload.text, ev.payload.is_err);
+        });
     }
 
     async init(): Promise<void> {
@@ -44,8 +55,16 @@ export class NativeTerminal implements TerminalPort {
         this.cwd = path;
     }
 
+    onOutput(cb: (line: string, isErr: boolean) => void): void {
+        this.listener = cb;
+    }
+
+    async kill(): Promise<void> {
+        await invoke("terminal_kill");
+    }
+
     formatPrompt(): string {
-        if (this.os === "windows") return `PS ${this.cwd}`;
+        if (this.os === "windows") return `PS ${this.cwd}>`;
         const folder = fileNameOf(this.cwd) || "/";
         const isZsh = this.shell.endsWith("zsh") || this.os === "macos";
         return isZsh ? `${folder} %` : `${folder} $`;

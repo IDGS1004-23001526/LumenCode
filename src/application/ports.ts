@@ -38,6 +38,8 @@ export interface TerminalPort {
   setCwd(path: string): void;
   /** Formatea el prompt según la shell real del SO (`PS C:\ruta>`, `carpeta %` o `carpeta $`). */
   formatPrompt(): string;
+  onOutput(cb: (line: string, isErr: boolean) => void): void;
+  kill(): Promise<void>;
   run(line: string): Promise<TerminalResult>;
 }
 

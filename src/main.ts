@@ -3,136 +3,74 @@ import "@fontsource-variable/jetbrains-mono";
 import "./styles.css";
 
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ask, open, save } from "@tauri-apps/plugin-dialog";
-import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
 
-import { createEditor } from "./editor";
+import { DEFAULT_SETTINGS, type Settings } from "./domain/types";
+import { createStore } from "./application/store";
+import { initialState, reducer } from "./application/reducer";
+import type { DialogPort } from "./application/ports";
+import { createUseCases } from "./application/useCases";
 
-// ---------------------------------------------------------------------------
+import { createTauriFileSystem } from "./infraestructure/tauriFileSystem";
+import { createTauriDialogs } from "./infraestructure/tauriDialogs";
+import { NativeTerminal } from "./infraestructure/nativeTerminal";
+import { localSettingsRepository } from "./infraestructure/localSettingsRepository";
+
+import { createCodeMirrorEditor } from "./presentation/editor/codemirrorEditor";
+import { promptModal } from "./presentation/promptModal";
+import { registerShortcuts } from "./presentation/shortcuts";
+import { mountExplorer } from "./presentation/views/explorerView";
+import { mountTabBar } from "./presentation/editor/tabBarView";
+import { mountBottomPanel } from "./presentation/editor/bottomPanelView";
+import { mountSettingsModal } from "./presentation/editor/settingsModal";
+
+const $ = (id: string) => document.getElementById(id) as HTMLElement;
+
 // Estado
-// ---------------------------------------------------------------------------
+const settingsRepo = localSettingsRepository;
+const store = createStore(reducer, initialState({ ...DEFAULT_SETTINGS, ...settingsRepo.load() }));
 
-let currentPath: string | null = null;
-let dirty = false;
-
-const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
-const docTitle = $("doc-title");
-const stDirty = $("st-dirty");
-const stPos = $("st-pos");
-const stLang = $("st-lang");
-
-const appWindow = getCurrentWindow();
-
-const fileName = (p: string | null) => (p ? (p.split(/[\\/]/).pop() ?? p) : "Sin título");
-
-function refreshChrome() {
-  const name = fileName(currentPath);
-  docTitle.textContent = dirty ? `${name} •` : name;
-  stDirty.hidden = !dirty;
-  document.title = `${dirty ? "● " : ""}${name} — Lumen`;
-  void appWindow.setTitle(document.title);
-}
-
-// ---------------------------------------------------------------------------
-// Editor
-// ---------------------------------------------------------------------------
-
-const editor = createEditor($("editor"), {
-  onChange: () => {
-    if (!dirty) {
-      dirty = true;
-      refreshChrome();
-    }
-  },
-  onCursor: (line, col) => {
-    stPos.textContent = `Ln ${line}, Col ${col}`;
-  },
+// Adaptadores
+const fs = createTauriFileSystem();
+const dialogs: DialogPort = { ...createTauriDialogs(), prompt: promptModal };
+const terminal = new NativeTerminal(); // Aquí invoca PowerShell en Win, zsh en Mac o bash en Linux
+const editor = createCodeMirrorEditor($("editor"), {
+  onChange: (path) => store.dispatch({ type: "tab/dirty", path, dirty: true }),
 });
 
-// ---------------------------------------------------------------------------
-// Acciones de archivo
-// ---------------------------------------------------------------------------
+// Casos de uso
+const uc = createUseCases({ store, fs, dialogs, editor, terminal });
 
-async function confirmDiscard(): Promise<boolean> {
-  if (!dirty) return true;
-  return ask("Tienes cambios sin guardar. ¿Descartarlos?", {
-    title: "Lumen",
-    kind: "warning",
-    okLabel: "Descartar",
-    cancelLabel: "Cancelar",
-  });
+// Vistas
+mountExplorer($("sidebar"), store, uc);
+mountTabBar($("tabbar"), store, uc);
+mountBottomPanel($("panel"), store, terminal);
+mountSettingsModal(store);
+registerShortcuts(store, uc);
+
+// Efectos globales derivados del estado
+function applySettings(s: Settings) {
+  const root = document.documentElement.style;
+  root.setProperty("--editor-font", s.fontFamily);
+  root.setProperty("--editor-font-size", `${s.fontSize}px`);
+  settingsRepo.save(s);
+  editor.remeasure();
 }
 
-async function newFile() {
-  if (!(await confirmDiscard())) return;
-  currentPath = null;
-  dirty = false;
-  stLang.textContent = editor.load("", null).name;
-  refreshChrome();
-}
-
-async function openFile() {
-  if (!(await confirmDiscard())) return;
-  const selected = await open({ multiple: false, directory: false });
-  if (typeof selected !== "string") return;
-  try {
-    const text = await readTextFile(selected);
-    currentPath = selected;
-    dirty = false;
-    stLang.textContent = editor.load(text, selected).name;
-    refreshChrome();
-  } catch (err) {
-    await ask(`No se pudo abrir el archivo.\n\n${String(err)}`, { title: "Lumen", kind: "error", okLabel: "Ok" });
-  }
-}
-
-async function saveFile(forceDialog = false) {
-  let target = currentPath;
-  if (!target || forceDialog) {
-    const chosen = await save({ defaultPath: currentPath ?? undefined });
-    if (!chosen) return;
-    target = chosen;
-  }
-  try {
-    await writeTextFile(target, editor.getText());
-    currentPath = target;
-    dirty = false;
-    stLang.textContent = editor.setLanguage(target).name;
-    refreshChrome();
-  } catch (err) {
-    await ask(`No se pudo guardar el archivo.\n\n${String(err)}`, { title: "Lumen", kind: "error", okLabel: "Ok" });
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Eventos de UI
-// ---------------------------------------------------------------------------
-
-$("btn-open").addEventListener("click", () => void openFile());
-$("btn-save").addEventListener("click", () => void saveFile());
-$("win-min").addEventListener("click", () => void appWindow.minimize());
-$("win-max").addEventListener("click", () => void appWindow.toggleMaximize());
-$("win-close").addEventListener("click", () => void appWindow.close());
-
-window.addEventListener("keydown", (e) => {
-  if (!(e.ctrlKey || e.metaKey)) return;
-  const key = e.key.toLowerCase();
-  if (key === "s") {
-    e.preventDefault();
-    void saveFile(e.shiftKey);
-  } else if (key === "o") {
-    e.preventDefault();
-    void openFile();
-  } else if (key === "n") {
-    e.preventDefault();
-    void newFile();
-  }
+store.subscribe((s, p) => {
+  if (s.activePath !== p.activePath) editor.activate(s.activePath);
+  if (s.settings !== p.settings) applySettings(s.settings);
+  if (s.sidebarVisible !== p.sidebarVisible) $("app").classList.toggle("no-sidebar", !s.sidebarVisible);
+  if (s.panelVisible !== p.panelVisible) editor.remeasure();
+  const active = s.tabs.find((t) => t.path === s.activePath);
+  document.title = active ? `${active.dirty ? "● " : ""}${active.name} - Lumencode` : "LumenCode";
 });
 
-// Pregunta antes de cerrar si hay cambios sin guardar.
-void appWindow.onCloseRequested(async (event) => {
-  if (!(await confirmDiscard())) event.preventDefault();
-});
+applySettings(store.getState().settings);
 
-refreshChrome();
-editor.focus();
+// Avisar al cerrar la ventana si hay cambios sin guardar
+void getCurrentWindow().onCloseRequested(async (event) => {
+  const dirty = store.getState().tabs.some((t) => t.dirty);
+  if (dirty && !(await dialogs.confirm("Hay archivos con cambios sin guardar. ¿Salir de todos modos?"))) {
+    event.preventDefault();
+  }
+});

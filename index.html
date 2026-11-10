@@ -3,46 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Lumen</title>
+    <title>LumenCode</title>
   </head>
   <body>
     <div id="app">
-      <header class="titlebar" data-tauri-drag-region>
-        <div class="brand" data-tauri-drag-region>
-          <span class="brand-dot" data-tauri-drag-region></span>
-          Lumen
-        </div>
-
-        <div id="doc-title" class="doc-title" data-tauri-drag-region>Sin título</div>
-
-        <div class="controls">
-          <button id="btn-open" class="ghost" title="Abrir (Ctrl+O)">Abrir</button>
-          <button id="btn-save" class="ghost" title="Guardar (Ctrl+S)">Guardar</button>
-          <span class="divider"></span>
-          <button id="win-min" class="win" title="Minimizar" aria-label="Minimizar">
-            <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 5h8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
-          </button>
-          <button id="win-max" class="win" title="Maximizar" aria-label="Maximizar">
-            <svg width="10" height="10" viewBox="0 0 10 10"><rect x="1.2" y="1.2" width="7.6" height="7.6" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
-          </button>
-          <button id="win-close" class="win close" title="Cerrar" aria-label="Cerrar">
-            <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1.5 1.5l7 7M8.5 1.5l-7 7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
-          </button>
-        </div>
-      </header>
-
-      <main id="editor"></main>
-
-      <footer class="statusbar">
-        <div class="left">
-          <span id="st-dirty" class="dirty" hidden>● sin guardar</span>
-        </div>
-        <div class="right">
-          <span id="st-pos">Ln 1, Col 1</span>
-          <span id="st-lang">Texto plano</span>
-          <span>UTF-8</span>
-        </div>
-      </footer>
+      <aside id="sidebar" class="sidebar"></aside>
+      <section class="workbench">
+        <header id="tabbar" class="tabbar" data-tauri-drag-region></header>
+        <main id="editor" class="editor-host"></main>
+        <section id="panel" class="panel"></section>
+      </section>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

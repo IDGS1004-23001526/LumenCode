@@ -8,7 +8,7 @@ import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
 import type { EditorPort } from "../../application/ports";
 // import { languageFor } from "./languages";
 import { lumenHighlight, lumenTheme } from "./theme";
-import { languageFor } from "../../editor";
+import { languageFor } from "./languages";
 
 export interface EditorCallbacks {
     onChange: (path: string) => void;

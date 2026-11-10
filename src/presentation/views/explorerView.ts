@@ -23,7 +23,7 @@ export function mountExplorer(el: HTMLElement, store: AppStore, uc: UseCases) {
         ]);
     });
 
-    el.append(h("div", { class: "sidebar-header" }) , h("span", { class: "sidebar-title" }, "Explorer Files"), menuBtn, treeEl);
+    el.append(h("div", { class: "sidebar-header" } , h("span", { class: "sidebar-title" }, "Explorer Files"), menuBtn), treeEl,);
 
     function renderNode(node: FileNode, depth: number, s: AppState, isRoot = false): HTMLElement[] {
         const open = s.expanded.has(node.path);
