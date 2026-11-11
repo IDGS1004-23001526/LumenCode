@@ -68,12 +68,20 @@ store.subscribe((s, p) => {
 
 applySettings(store.getState().settings);
 
-// Avisar al cerrar la ventana si hay cambios sin guardar
-void getCurrentWindow().onCloseRequested(async (event) => {
+// Avisar al cerrar la ventana si hay cambios sin guardar y liberar subprocesos
+const appWin = getCurrentWindow();
+void appWin.onCloseRequested(async (event) => {
   const dirty = store.getState().tabs.some((t) => t.dirty);
-  if (dirty && !(await dialogs.confirm("Hay archivos con cambios sin guardar. ¿Salir de todos modos?"))) {
+  if (dirty) {
     event.preventDefault();
+    const ok = await dialogs.confirm(
+      "Hay archivos con cambios sin guardar. ¿Salir de todos modos?",
+      "Salir sin guardar",
+    );
+    if (!ok) return;
   }
+  await terminal.kill().catch(() => {});
+  await appWin.destroy();
 });
 
 window.addEventListener("contextmenu", (e) => {
