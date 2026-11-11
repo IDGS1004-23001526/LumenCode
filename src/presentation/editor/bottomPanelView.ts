@@ -2,7 +2,6 @@ import type { AppState, PanelView } from "../../domain/types";
 import type { AppStore } from "../../application/reducer";
 import type { TerminalPort } from "../../application/ports";
 import { cx, h } from "../dom";
-import { splitLine } from "@codemirror/commands";
 
 const VIEWS: { id: PanelView; label: string } [] = [
     { id: "problems", label: "Problems" },

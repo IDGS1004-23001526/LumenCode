@@ -1,6 +1,6 @@
 import { h } from "./dom";
 
-export type MenuEntry = { label: string; shorcut?: string; disabled?: boolean; run: () => unknown } | "separator";
+export type MenuEntry = { label: string; shortcut?: string; disabled?: boolean; run: () => unknown } | "separator";
 
 let current: HTMLElement | null = null;
 
@@ -35,7 +35,7 @@ export function showContextMenu(x: number, y: number, entries: MenuEntry[]) {
                 "button",
                 { class: "menu-item", role: "menuitem", disabled: !!it.disabled, onclick: () => { hideContextMenu(); void it.run(); } },
                 h("span", {}, it.label),
-                it.shorcut ? h("kbd", {}, it.shorcut) : null
+                it.shortcut ? h("kbd", {}, it.shortcut) : null
             ),
         );
     }

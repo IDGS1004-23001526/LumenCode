@@ -6,11 +6,12 @@ export interface FileSystemPort {
   writeText(path: string, content: string): Promise<void>;
   mkdir(path: string): Promise<void>;
   exists(path: string): Promise<boolean>;
+  remove(path: string): Promise<void>;
 }
 
 export interface DialogPort {
   pickFolder(): Promise<string | null>;
-  confirm(message: string): Promise<boolean>;
+  confirm(message: string, okLabel?: string): Promise<boolean>;
   error(message: string): Promise<void>;
   prompt(label: string): Promise<string | null>;
 }

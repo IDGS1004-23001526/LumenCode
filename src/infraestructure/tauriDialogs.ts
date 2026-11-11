@@ -8,8 +8,8 @@ export function createTauriDialogs(): Omit<DialogPort, "prompt"> {
             const r = await open({ directory: true, multiple: false, recursive: true });
             return typeof r === "string" ? r : null;
         },
-        confirm: (msg) =>
-            ask(msg, {title: "LumenCode", kind: "warning", okLabel: "Descartar", cancelLabel: "Cancelar"}),
+        confirm: (msg, okLabel = "Descartar") =>
+            ask(msg, {title: "LumenCode", kind: "warning", okLabel, cancelLabel: "Cancelar"}),
         error: async (msg) => {
             await message(msg, { title: "LumenCode", kind: "error" });
         }, 

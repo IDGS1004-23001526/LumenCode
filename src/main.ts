@@ -22,6 +22,7 @@ import { mountExplorer } from "./presentation/views/explorerView";
 import { mountTabBar } from "./presentation/editor/tabBarView";
 import { mountBottomPanel } from "./presentation/editor/bottomPanelView";
 import { mountSettingsModal } from "./presentation/editor/settingsModal";
+import { showContextMenu } from "./presentation/contextMenu";
 
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
 
@@ -73,4 +74,22 @@ void getCurrentWindow().onCloseRequested(async (event) => {
   if (dirty && !(await dialogs.confirm("Hay archivos con cambios sin guardar. ¿Salir de todos modos?"))) {
     event.preventDefault();
   }
+});
+
+window.addEventListener("contextmenu", (e) => {
+  e.preventDefault();
+
+  const root = store.getState().rootPath;
+  const noRoot = !root;
+
+  showContextMenu(e.clientX, e.clientY, [
+    { label: "Nuevo archivo", disabled: noRoot, run: () => uc.createEntry("file") },
+    { label: "Nueva Carpeta", disabled: noRoot, run: () => uc.createEntry("folder") },
+    "separator",
+    { label: "Abrir carpeta...", shortcut: "Ctrl+O", run: uc.openFolder },
+    { label: "Guardar archivo", shortcut: "Ctrl+s", disabled: !store.getState().activePath, run: uc.saveActive },
+    "separator",
+    { label: "Mostrar/ocultar terminal", shortcut: "Ctrl+`", run: () => store.dispatch({ type: "panel/toggle" }) },
+    { label: "Preferencias...", shortcut: "Ctrl+,", run: () => store.dispatch({ type: "settings/open", open: true }) },
+  ]);
 });
