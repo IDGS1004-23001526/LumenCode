@@ -21,6 +21,20 @@ export function normalizePath(p: string): string {
   return "/" + out.join("/");
 }
 
+/** Devuelve la carpeta contenedora de una ruta */
+export function parentDirOf(path: string): string {
+  const idx = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
+  return idx > 0 ? path.slice(0, idx) : path;
+}
+
+/** Verifica que el nombre de archivo tenga nombre y extensión */
+export function hasFileExtension(name: string): boolean {
+  const trimmed = name.trim();
+  const dot = trimmed.lastIndexOf(".");
+  return dot > 0 && dot < trimmed.length -1;
+}
+
+
 export const isAbsolutePath = (p: string): boolean => /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith("/");
 
 export const isValidName = (name: string): boolean =>

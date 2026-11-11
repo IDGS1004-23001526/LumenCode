@@ -1,5 +1,5 @@
 import type { FileNode } from "../domain/types";
-import { isTextFile, isValidName, joinPath } from "../domain/path";
+import { hasFileExtension, isTextFile, isValidName, joinPath } from "../domain/path";
 import type { AppStore } from "./reducer";
 import type { DialogPort, EditorPort, FileSystemPort, TerminalPort } from "./ports";
 
@@ -90,22 +90,61 @@ export function createUseCases({ store, fs, dialogs, editor, terminal }: Deps) {
     }
   }
 
-  async function createEntry(kind: "file" | "folder") {
-    const root = st().rootPath;
-    if (!root) return openFolder();
-    const name = await dialogs.prompt(kind === "file" ? "Nombre del nuevo archivo" : "Nombre de la nueva carpeta");
+  async function createEntry(kind: "file" | "folder", targetDir?: string) {
+    const baseDir = targetDir ?? st().rootPath;
+    if (!baseDir) return openFolder();
+
+    const name = await dialogs.prompt(
+      kind === "file"
+      ? "Nombre y extensión del nuevo archivo"
+      : "Nombre de la nueva carpeta",
+    );
+
     if (!name) return;
-    if (!isValidName(name)) return dialogs.error("Nombre no válido.");
-    const path = joinPath(root, name);
+    if (!isValidName(name)) {
+      return dialogs.error("El nombre contiene caracteres no válidos");
+    }
+
+    if (kind === "file" && !hasFileExtension(name)){
+      return dialogs.error("Debe incluir nombre y extensión del archivo")
+    }
+
+    const path = joinPath(baseDir, name.trim());
+
     try {
-      if (await fs.exists(path)) return dialogs.error(`"${name}" ya existe.`);
+      if (await fs.exists(path)) return dialogs.error(`"${name}" ya existe en esta ubicación`);
       if (kind === "file") await fs.writeText(path, "");
       else await fs.mkdir(path);
     } catch (e) {
-      return dialogs.error(`No se pudo crear.\n\n${String(e)}`);
+      return dialogs.error(`No se pudo crear \n\n${String(e)}`);
     }
+
+    // Asegurar que la carpeta donde se creó quede expandida y actualizada
+    store.dispatch({ type: "tree/setExpanded", path: baseDir, expanded: true });
     await refresh();
     if (kind === "file") await openFile(path);
+  }
+
+  async function deleteFile(node: FileNode) {
+    if (node.isDir) return;
+
+    const ok = await dialogs.confirm(`¿Estás seguro de que deseas eliminarlo? "${node.name}"?`, "Eliminar");
+
+    if (!ok) return;
+
+    try {
+      await fs.remove(node.path);
+    } catch (e) {
+      return dialogs.error(`No se pudo eliminar el archivo \n\n${String(e)}`);
+    }
+
+    // Si el archivo eliminado estaba abierto en una pestaña, la cerramos
+    if (st().tabs.some((t) => t.path === node.path)) {
+      editor.close(node.path);
+      store.dispatch({ type: "tab/close", path: node.path });
+    }
+
+    await refresh();
   }
 
   return {
@@ -116,6 +155,7 @@ export function createUseCases({ store, fs, dialogs, editor, terminal }: Deps) {
     closeTab,
     saveActive,
     createEntry,
+    deleteFile,
     collapseAll: () => store.dispatch({ type: "tree/collapseAll" }),
   };
 }

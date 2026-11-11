@@ -6,11 +6,12 @@ export interface FileSystemPort {
   writeText(path: string, content: string): Promise<void>;
   mkdir(path: string): Promise<void>;
   exists(path: string): Promise<boolean>;
+  remove(path: string): Promise<void>;
 }
 
 export interface DialogPort {
   pickFolder(): Promise<string | null>;
-  confirm(message: string): Promise<boolean>;
+  confirm(message: string, okLabel?: string): Promise<boolean>;
   error(message: string): Promise<void>;
   prompt(label: string): Promise<string | null>;
 }
@@ -38,6 +39,8 @@ export interface TerminalPort {
   setCwd(path: string): void;
   /** Formatea el prompt según la shell real del SO (`PS C:\ruta>`, `carpeta %` o `carpeta $`). */
   formatPrompt(): string;
+  onOutput(cb: (line: string, isErr: boolean) => void): void;
+  kill(): Promise<void>;
   run(line: string): Promise<TerminalResult>;
 }
 

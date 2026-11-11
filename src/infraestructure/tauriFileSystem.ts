@@ -1,4 +1,4 @@
-import { exists, mkdir, readDir, readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
+import { exists, mkdir, readDir, readTextFile, remove, writeTextFile } from "@tauri-apps/plugin-fs";
 import type { FileSystemPort } from "../application/ports";
 import { sortNodes } from "../domain/fileTree";
 import { joinPath } from "../domain/path";
@@ -13,5 +13,6 @@ export function createTauriFileSystem(): FileSystemPort {
         writeText: (p, c) => writeTextFile(p, c),
         mkdir: (p) => mkdir(p),
         exists: (p) => exists(p),
+        remove: (p) => remove(p), 
     };
 }
