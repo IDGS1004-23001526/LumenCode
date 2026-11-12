@@ -142,3 +142,24 @@ kbd { font: 11px var(--editor-font); color: var(--fg-muted); }
 /* Scrollbars suaves */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--tab-inactive); border-radius: 10px; border: 3px solid transparent; background-clip: content-box; }
+
+/** Animaciones de cursor */
+@keyframes cm-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+@keyframes cm-smooth {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+@keyframes cm-phase {
+  0%, 65%, 100% { opacity: 1; }
+  85% { opacity: 0; }
+}
+
+@keyframes cm-expand {
+  0%, 20%, 100% { transform: scaleY(1); opacity: 1; }
+  60% { transform: scaleY(0.05); opacity: 0.25; }
+}

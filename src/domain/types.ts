@@ -14,11 +14,14 @@ export interface Tab {
 }
 
 export type PanelView = "problems" | "output" | "debug" | "terminal";
+export type CursorBlinking = "blink" | "smooth" | "phase" | "expand" | "solid"; 
 
 export interface Settings {
     theme: "lumen-light",
     fontFamily: string;
     fontSize: number;
+    cursorSmooth: boolean;
+    cursorBlinking: CursorBlinking;
 }
 
 export interface AppState {
@@ -37,5 +40,7 @@ export interface AppState {
 export const DEFAULT_SETTINGS: Settings = {
     theme: "lumen-light",
     fontFamily: "'Monaspace Krypton', 'JetBrains Mono Variable', monospace",
-    fontSize: 14
+    fontSize: 14,
+    cursorSmooth: true,
+    cursorBlinking: "expand",
 };

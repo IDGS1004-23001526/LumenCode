@@ -53,6 +53,19 @@ function applySettings(s: Settings) {
   const root = document.documentElement.style;
   root.setProperty("--editor-font", s.fontFamily);
   root.setProperty("--editor-font-size", `${s.fontSize}px`);
+  root.setProperty(
+    "--cursor-transition",
+    s.cursorSmooth ? "left 85ms cubic-bezier(0.22, 1, 0.36, 1), top 85ms cubic-bezier(0.22, 1, 0,36, 1)" : "none",
+  );
+
+  const animMap: Record<Settings["cursorBlinking"], string> = {
+    expand: "cm-expand 1.1s ease-in-out infinite",
+    smooth: "cm-smooth 1.1s ease-in-out infinite",
+    phase: "cm-phase 1.1s ease-in-out infinite",
+    blink: "cm-blink 1.1s step-end infinite",
+    solid: "none",
+  };
+  root.setProperty("--cursor-animation", animMap[s.cursorBlinking] ?? "none");
   settingsRepo.save(s);
   editor.remeasure();
 }
