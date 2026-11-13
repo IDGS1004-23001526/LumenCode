@@ -14,6 +14,8 @@ import { createTauriFileSystem } from "./infraestructure/tauriFileSystem";
 import { createTauriDialogs } from "./infraestructure/tauriDialogs";
 import { NativeTerminal } from "./infraestructure/nativeTerminal";
 import { localSettingsRepository } from "./infraestructure/localSettingsRepository";
+import { findTheme } from "./infraestructure/themeRepository";
+import { setAnimationsEnabled } from "./presentation/animate";
 
 import { createCodeMirrorEditor } from "./presentation/editor/codemirrorEditor";
 import { promptModal } from "./presentation/promptModal";
@@ -23,6 +25,7 @@ import { mountTabBar } from "./presentation/editor/tabBarView";
 import { mountBottomPanel } from "./presentation/editor/bottomPanelView";
 import { mountSettingsModal } from "./presentation/editor/settingsModal";
 import { showContextMenu } from "./presentation/contextMenu";
+import { WorkspaceIndexer } from "./application/workspaceIndexer";
 
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
 
@@ -34,12 +37,17 @@ const store = createStore(reducer, initialState({ ...DEFAULT_SETTINGS, ...settin
 const fs = createTauriFileSystem();
 const dialogs: DialogPort = { ...createTauriDialogs(), prompt: promptModal };
 const terminal = new NativeTerminal(); // Aquí invoca PowerShell en Win, zsh en Mac o bash en Linux
+const indexer = new WorkspaceIndexer(fs);
 const editor = createCodeMirrorEditor($("editor"), {
-  onChange: (path) => store.dispatch({ type: "tab/dirty", path, dirty: true }),
+  onChange: (path, content) => {
+    store.dispatch({ type: "tab/dirty", path, dirty: true });
+    indexer.updateFile(path, content);
+  },
+  getIndex: () => indexer.index,
 });
 
 // Casos de uso
-const uc = createUseCases({ store, fs, dialogs, editor, terminal });
+const uc = createUseCases({ store, fs, dialogs, editor, terminal, indexer });
 
 // Vistas
 mountExplorer($("sidebar"), store, uc);
@@ -49,13 +57,26 @@ mountSettingsModal(store);
 registerShortcuts(store, uc);
 
 // Efectos globales derivados del estado
+let appliedThemeVars: string[] = [];
+
 function applySettings(s: Settings) {
+  setAnimationsEnabled(s.animations ?? true);
   const root = document.documentElement.style;
+  const activeTheme = findTheme(s.theme);
+  for (const k of appliedThemeVars) root.removeProperty(k);
+  appliedThemeVars = Object.keys(activeTheme.colors);
+  for (const [varName, value] of Object.entries(activeTheme.colors)) {
+    root.setProperty(varName, value);
+  }
+  root.setProperty("--tab-inactive", activeTheme.colors["--tab-inactive"] ?? activeTheme.colors["--surface"] ?? "#eaeff5");
+  root.setProperty("--fg-faint", activeTheme.colors["--fg-faint"] ?? activeTheme.colors["--fg-muted"] ?? "#9aa5b1");
+  root.colorScheme = activeTheme.dark ? "dark" : "light";
+
   root.setProperty("--editor-font", s.fontFamily);
   root.setProperty("--editor-font-size", `${s.fontSize}px`);
   root.setProperty(
     "--cursor-transition",
-    s.cursorSmooth ? "left 85ms cubic-bezier(0.22, 1, 0.36, 1), top 85ms cubic-bezier(0.22, 1, 0,36, 1)" : "none",
+    s.cursorSmooth ? "left 85ms cubic-bezier(0.22, 1, 0.36, 1), top 85ms cubic-bezier(0.22, 1, 0.36, 1)" : "none",
   );
 
   const animMap: Record<Settings["cursorBlinking"], string> = {

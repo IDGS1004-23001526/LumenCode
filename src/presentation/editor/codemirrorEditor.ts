@@ -5,13 +5,17 @@ import { bracketMatching, foldGutter, foldKeymap, indentOnInput, indentUnit, syn
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from "@codemirror/autocomplete";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
 
+import type { ProjectIndex } from "../../domain/symbolIndex";
+import { createSmartCompletionSource } from "./smartCompletion";
+
 import type { EditorPort } from "../../application/ports";
 // import { languageFor } from "./languages";
 import { lumenHighlight, lumenTheme } from "./theme";
 import { languageFor } from "./languages";
 
 export interface EditorCallbacks {
-    onChange: (path: string) => void;
+    onChange: (path: string, content: string) => void;
+    getIndex: () => ProjectIndex;
 }
 
 const smoothCaret = ViewPlugin.fromClass(
@@ -167,7 +171,12 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
                 indentOnInput(),
                 bracketMatching(),
                 closeBrackets(),
-                autocompletion(),
+                autocompletion({
+                    activateOnTyping: true,
+                    maxRenderedOptions: 25,
+                    defaultKeymap: true,
+                    override: [createSmartCompletionSource(cb.getIndex, () => path)],
+                }),
                 rectangularSelection(),
                 highlightActiveLine(),
                 highlightSelectionMatches(),
@@ -179,7 +188,7 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
                 syntaxHighlighting(lumenHighlight),
                 languageFor(path).support,
                 EditorView.updateListener.of((u) => {
-                    if (u.docChanged) cb.onChange(path);
+                    if (u.docChanged) cb.onChange(path, u.state.doc.toString());
                 }),
             ],
         });

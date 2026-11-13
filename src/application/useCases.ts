@@ -2,6 +2,7 @@ import type { FileNode } from "../domain/types";
 import { hasFileExtension, isTextFile, isValidName, joinPath } from "../domain/path";
 import type { AppStore } from "./reducer";
 import type { DialogPort, EditorPort, FileSystemPort, TerminalPort } from "./ports";
+import type { WorkspaceIndexer } from "./workspaceIndexer";
 
 interface Deps {
   store: AppStore;
@@ -9,11 +10,12 @@ interface Deps {
   dialogs: DialogPort;
   editor: EditorPort;
   terminal: TerminalPort;
+  indexer: WorkspaceIndexer;
 }
 
 export type UseCases = ReturnType<typeof createUseCases>;
 
-export function createUseCases({ store, fs, dialogs, editor, terminal }: Deps) {
+export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }: Deps) {
   const st = () => store.getState();
 
   async function loadChildren(path: string): Promise<boolean> {
@@ -37,6 +39,7 @@ export function createUseCases({ store, fs, dialogs, editor, terminal }: Deps) {
     // Recarga subcarpetas que estaban abiertas (padres antes que hijos).
     const open = [...st().expanded].filter((p) => p !== root).sort((a, b) => a.length - b.length);
     for (const p of open) await loadChildren(p);
+    void indexer.scanWorkspace(root);
   }
 
   async function openFolder() {
@@ -64,7 +67,9 @@ export function createUseCases({ store, fs, dialogs, editor, terminal }: Deps) {
     }
     if (!isTextFile(path)) return dialogs.error("Este tipo de archivo no se puede abrir en el editor.");
     try {
+      const text = await fs.readText(path);
       editor.open(path, await fs.readText(path));
+      indexer.updateFile(path, text);
       store.dispatch({ type: "tab/open", path });
     } catch (e) {
       await dialogs.error(`No se pudo abrir el archivo.\n\n${String(e)}`);
@@ -134,6 +139,7 @@ export function createUseCases({ store, fs, dialogs, editor, terminal }: Deps) {
 
     try {
       await fs.remove(node.path);
+      indexer.removeFile(node.path);
     } catch (e) {
       return dialogs.error(`No se pudo eliminar el archivo \n\n${String(e)}`);
     }
