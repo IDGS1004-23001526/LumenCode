@@ -1,6 +1,6 @@
 import { open as pickFile } from "@tauri-apps/plugin-dialog";
 import { readTextFile } from "@tauri-apps/plugin-fs";
-import type { AppState, CursorBlinking, ExtensionManifest, ThemeManifest } from "../../domain/types";
+import type { AppState, CursorBlinking, ExtensionManifest, IconThemeManifest, ThemeManifest } from "../../domain/types";
 import type { AppStore } from "../../application/reducer";
 import {
   BUILTIN_THEMES,
@@ -10,12 +10,20 @@ import {
   saveCustomTheme,
 } from "../../infraestructure/themeRepository";
 import {
+  BUILTIN_ICON_THEMES,
+  getAllIconThemes,
+  parseIconThemeJson,
+  removeCustomIconTheme,
+  saveCustomIconTheme,
+} from "../../infraestructure/iconThemeRepository";
+import {
   getCatalogExtensions,
   installExtension,
   isExtensionInstalled,
   uninstallExtension,
 } from "../../infraestructure/extensionRepository";
 import { cx, h } from "../dom";
+import { iconForFile, iconForFolder } from "../icons";
 import { animateFadeSlide, animateModalOpen } from "../animate";
 
 type SectionId = "editor" | "appearance" | "extensions" | "keybindings";
@@ -47,6 +55,9 @@ const SHORTCUTS = [
   ["Ctrl + O", "Abrir carpeta de proyecto"],
   ["Ctrl + B", "Mostrar u ocultar el explorador"],
   ["Ctrl + `", "Mostrar u ocultar la terminal"],
+  ["Ctrl + +", "Aumentar tamaño de fuente"],
+  ["Ctrl + -", "Disminuir tamaño de fuente"],
+  ["Ctrl + 0", "Restablecer tamaño de fuente (14px)"],
   ["Ctrl + ,", "Abrir preferencias"],
 ];
 
@@ -152,6 +163,72 @@ export function mountSettingsModal(store: AppStore) {
     );
   };
 
+  const renderIconPreview = (it: IconThemeManifest) => {
+    const samples = [
+      iconForFolder("src", true, it),
+      iconForFolder("routes", false, it),
+      iconForFolder("utils", false, it),
+      iconForFile("App.tsx", it),
+      iconForFile("package.json", it),
+      iconForFile("main.rs", it),
+    ];
+    return h(
+      "div",
+      { class: "theme-swatches icon-preview-row" },
+      ...samples.map((svg) => {
+        const span = h("span", { class: "icon-preview-chip" });
+        span.innerHTML = svg;
+        return span;
+      }),
+    );
+  };
+
+  const renderIconThemeCard = (it: IconThemeManifest, activeId: string, isCustom: boolean) => {
+    const isActive = it.id === activeId;
+    return h(
+      "div",
+      { class: cx("theme-card", isActive && "active") },
+      renderIconPreview(it),
+      h(
+        "div",
+        { class: "theme-meta" },
+        h("div", { class: "theme-name" }, it.name),
+        h("div", { class: "theme-author" }, `${it.author} · Iconos`),
+      ),
+      h(
+        "div",
+        { class: "theme-actions" },
+        h(
+          "button",
+          {
+            class: cx("btn", isActive ? "ghost" : "primary"),
+            disabled: isActive,
+            onclick: () => {
+              store.dispatch({ type: "settings/update", patch: { iconTheme: it.id } });
+              renderBody(store.getState());
+            },
+          },
+          isActive ? "Activo" : "Aplicar",
+        ),
+        isCustom
+          ? h(
+              "button",
+              {
+                class: "btn ghost",
+                title: "Desinstalar paquete de iconos",
+                onclick: () => {
+                  removeCustomIconTheme(it.id);
+                  if (isActive) store.dispatch({ type: "settings/update", patch: { iconTheme: "lumen-icons" } });
+                  renderBody(store.getState());
+                },
+              },
+              "Quitar",
+            )
+          : null,
+      ),
+    );
+  };
+
   function renderNav() {
     navEl.replaceChildren(
       ...SECTIONS.map((sec) =>
@@ -182,7 +259,7 @@ export function mountSettingsModal(store: AppStore) {
     const matches = (text: string) => !q || text.toLowerCase().includes(q);
     const items: HTMLElement[] = [];
 
-    // 1. TEXT EDITOR
+    // TEXT EDITOR
     if (activeSection === "editor" || q) {
       if (matches("fuente font family tipografía")) {
         const font = h("select", { class: "field" }, ...FONTS.map((f) => h("option", { value: f.value }, f.label))) as HTMLSelectElement;
@@ -252,8 +329,8 @@ export function mountSettingsModal(store: AppStore) {
       }
     }
 
-    // 2. APPEARANCE
-    if (activeSection === "appearance" || (q && matches("tema theme apariencia paleta animaciones animations"))) {
+    // APPEARANCE
+    if (activeSection === "appearance" || (q && matches("tema theme apariencia paleta iconos icons animaciones animations"))) {
       const animToggle = h("input", {
         type: "checkbox",
         checked: s.settings.animations ?? true,
@@ -266,25 +343,36 @@ export function mountSettingsModal(store: AppStore) {
 
       const themes = getAllThemes();
       const builtinIds = new Set(BUILTIN_THEMES.map((b) => b.id));
+      const iconThemes = getAllIconThemes();
+      const builtinIconIds = new Set(BUILTIN_ICON_THEMES.map((b) => b.id));
+
       items.push(
         settingItem(
           "Animaciones de interfaz",
-          "Transiciones suaves con GSAP al abrir diálogos y navegar entre vistas.",
+          "Activado por defecto, si presenta problemas de rendimiento, desactivalo",
           animToggle,
         ),
         h("div", { class: "settings-group-title" }, "Paletas de color instaladas"),
         h("div", { class: "themes-grid" }, ...themes.map((t) => renderThemeCard(t, s.settings.theme, !builtinIds.has(t.id)))),
+        h("div", { class: "settings-group-title" }, "Paquetes de iconos instalados"),
+        h(
+          "div",
+          { class: "themes-grid" },
+          ...iconThemes.map((it) => renderIconThemeCard(it, s.settings.iconTheme, !builtinIconIds.has(it.id))),
+        ),
       );
     }
 
-    // 3. EXTENSIONS (Catálogo comunidad + Vista detalle estilo VS Code + Importar JSON)
-    if (activeSection === "extensions" || (q && matches("extensions extensiones tienda tema json comunidad"))) {
+    // EXTENSIONS 
+    if (activeSection === "extensions" || (q && matches("extensions extensiones tienda tema iconos icons json comunidad"))) {
       const catalog = getCatalogExtensions();
       const selectedExt = selectedExtId ? catalog.find((e) => e.id === selectedExtId) ?? null : null;
 
       if (selectedExt) {
         const installed = isExtensionInstalled(selectedExt);
         const isThemeActive = Boolean(selectedExt.theme && s.settings.theme === selectedExt.theme.id);
+        const isIconActive = Boolean(selectedExt.iconTheme && s.settings.iconTheme === selectedExt.iconTheme.id);
+        const isActive = isThemeActive || isIconActive;
         const swatches = selectedExt.theme
           ? ["--bg", "--surface", "--accent", "--syn-keyword", "--syn-string"].map((k) =>
               h("span", { class: "swatch", style: `background:${selectedExt.theme!.colors[k] ?? "#ccc"}` }),
@@ -304,6 +392,9 @@ export function mountSettingsModal(store: AppStore) {
                     if (isThemeActive) {
                       store.dispatch({ type: "settings/update", patch: { theme: "lumen-light" } });
                     }
+                    if (isIconActive) {
+                      store.dispatch({ type: "settings/update", patch: { iconTheme: "lumen-icons" } });
+                    }
                   } else {
                     installExtension(selectedExt);
                   }
@@ -315,19 +406,23 @@ export function mountSettingsModal(store: AppStore) {
           );
         }
 
-        if (installed && selectedExt.theme) {
+        if (installed && (selectedExt.theme || selectedExt.iconTheme)) {
           actionBtns.push(
             h(
               "button",
               {
-                class: cx("btn", isThemeActive ? "ghost" : "primary"),
-                disabled: isThemeActive,
+                class: cx("btn", isActive ? "ghost" : "primary"),
+                disabled: isActive,
                 onclick: () => {
-                  store.dispatch({ type: "settings/update", patch: { theme: selectedExt.theme!.id } });
+                  if (selectedExt.theme) {
+                    store.dispatch({ type: "settings/update", patch: { theme: selectedExt.theme.id } });
+                  } else if (selectedExt.iconTheme) {
+                    store.dispatch({ type: "settings/update", patch: { iconTheme: selectedExt.iconTheme.id } });
+                  }
                   renderBody(store.getState());
                 },
               },
-              isThemeActive ? "Tema activo" : "Usar tema",
+              isActive ? "En uso" : selectedExt.iconTheme ? "Usar iconos" : "Usar tema",
             ),
           );
         }
@@ -364,7 +459,9 @@ export function mountSettingsModal(store: AppStore) {
                   h("span", {}, " }"),
                 ),
               )
-            : null;
+            : selectedExt.iconTheme
+              ? renderIconPreview(selectedExt.iconTheme)
+              : null;
 
         items.push(
           h(
@@ -412,25 +509,32 @@ export function mountSettingsModal(store: AppStore) {
             onclick: async () => {
               const selected = await pickFile({
                 multiple: false,
-                filters: [{ name: "Lumen Theme JSON", extensions: ["json"] }],
+                filters: [{ name: "Lumen Theme / Icons JSON", extensions: ["json"] }],
               });
               if (typeof selected !== "string") return;
               try {
                 const raw = await readTextFile(selected);
-                const parsed = parseThemeJson(raw);
-                if (!parsed) {
-                  alert("El archivo JSON no tiene el formato válido de tema ({ name, colors }).");
+                const parsedIcon = parseIconThemeJson(raw);
+                if (parsedIcon) {
+                  saveCustomIconTheme(parsedIcon);
+                  store.dispatch({ type: "settings/update", patch: { iconTheme: parsedIcon.id } });
+                  renderBody(store.getState());
                   return;
                 }
-                saveCustomTheme(parsed);
-                store.dispatch({ type: "settings/update", patch: { theme: parsed.id } });
-                renderBody(store.getState());
+                const parsedTheme = parseThemeJson(raw);
+                if (parsedTheme) {
+                  saveCustomTheme(parsedTheme);
+                  store.dispatch({ type: "settings/update", patch: { theme: parsedTheme.id } });
+                  renderBody(store.getState());
+                  return;
+                }
+                alert("El archivo JSON no corresponde a un tema de color ni a un paquete de iconos válido.");
               } catch (e) {
-                alert(`No se pudo importar el tema: ${String(e)}`);
+                alert(`No se pudo importar el archivo: ${String(e)}`);
               }
             },
           },
-          "Importar tema (.json)",
+          "Importar (.json)",
         );
 
         const filtered = catalog.filter((ext) => {
@@ -442,6 +546,8 @@ export function mountSettingsModal(store: AppStore) {
         const renderExtCard = (ext: ExtensionManifest) => {
           const installed = isExtensionInstalled(ext);
           const isThemeActive = Boolean(ext.theme && s.settings.theme === ext.theme.id);
+          const isIconActive = Boolean(ext.iconTheme && s.settings.iconTheme === ext.iconTheme.id);
+          const isActive = isThemeActive || isIconActive;
           const swatches = ext.theme
             ? ["--bg", "--surface", "--accent", "--syn-keyword", "--syn-string"].map((k) =>
                 h("span", { class: "swatch", style: `background:${ext.theme!.colors[k] ?? "#ccc"}` }),
@@ -464,11 +570,12 @@ export function mountSettingsModal(store: AppStore) {
                 "div",
                 { class: "ext-title" },
                 ext.name,
-                h("span", { class: "ext-badge" }, isThemeActive ? "Activo" : installed ? "Instalada" : ext.category),
+                h("span", { class: "ext-badge" }, isActive ? "Activo" : installed ? "Instalada" : ext.category),
               ),
               h("div", { class: "ext-desc" }, `${ext.author} · v${ext.version}`),
             ),
             swatches.length ? h("div", { class: "theme-swatches" }, ...swatches) : null,
+            ext.iconTheme ? renderIconPreview(ext.iconTheme) : null,
             h("div", { class: "ext-desc" }, ext.summary),
             h(
               "div",
@@ -482,13 +589,15 @@ export function mountSettingsModal(store: AppStore) {
                     if (!installed) {
                       installExtension(ext);
                       if (ext.theme) store.dispatch({ type: "settings/update", patch: { theme: ext.theme.id } });
-                    } else if (ext.theme && !isThemeActive) {
-                      store.dispatch({ type: "settings/update", patch: { theme: ext.theme.id } });
+                      if (ext.iconTheme) store.dispatch({ type: "settings/update", patch: { iconTheme: ext.iconTheme.id } });
+                    } else if (!isActive) {
+                      if (ext.theme) store.dispatch({ type: "settings/update", patch: { theme: ext.theme.id } });
+                      if (ext.iconTheme) store.dispatch({ type: "settings/update", patch: { iconTheme: ext.iconTheme.id } });
                     }
                     renderBody(store.getState());
                   },
                 },
-                !installed ? "Instalar" : isThemeActive ? "En uso" : "Usar tema",
+                !installed ? "Instalar" : isActive ? "En uso" : ext.iconTheme ? "Usar iconos" : "Usar tema",
               ),
             ),
           );
@@ -532,7 +641,7 @@ export function mountSettingsModal(store: AppStore) {
       }
     }
 
-    // 4. KEYBINDINGS
+    // KEYBINDINGS
     if (activeSection === "keybindings" || (q && matches("atajos shortcuts keybindings teclado"))) {
       items.push(
         h(

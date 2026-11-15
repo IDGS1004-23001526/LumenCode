@@ -50,7 +50,7 @@ export function languageFor(path: string | null): Lang {
     case "js":
     case "mjs":
     case "cjs":
-      return { name: "JavaScript", support: javascript() };
+      return { name: "JavaScript", support: javascript({ jsx: true }) };
     case "jsx":
       return { name: "JSX", support: javascript({ jsx: true }) };
     case "ts":
@@ -136,5 +136,104 @@ export function languageFor(path: string | null): Lang {
 
     default:
       return PLAIN;
+  }
+}
+
+export interface LspServerSpec {
+  /** Clave compartida del proceso (ej. "typescript" para js/jsx/ts/tsx) */
+  serverKey: string;
+  /** languageId estándar LSP */
+  languageId: string;
+  /** Candidatos [comando, args] ordenados por preferencia */
+  candidates: [string, string[]][];
+}
+
+export function lspSpecFor(path: string | null): LspServerSpec | null {
+  if (!path) return null;
+  const fileName = path.split(/[\\/]/).pop()?.toLowerCase() ?? "";
+  if (fileName === "dockerfile") {
+    return { serverKey: "dockerfile", languageId: "dockerfile", candidates: [["docker-langserver", ["--stdio"]]] };
+  }
+
+  const ext = fileName.split(".").pop() ?? "";
+  switch (ext) {
+    case "js":
+    case "mjs":
+    case "cjs":
+      return { serverKey: "typescript", languageId: "javascriptreact", candidates: [["typescript-language-server", ["--stdio"]]] };
+    case "jsx":
+      return { serverKey: "typescript", languageId: "javascriptreact", candidates: [["typescript-language-server", ["--stdio"]]] };
+    case "ts":
+    case "mts":
+    case "cts":
+      return { serverKey: "typescript", languageId: "typescript", candidates: [["typescript-language-server", ["--stdio"]]] };
+    case "tsx":
+      return { serverKey: "typescript", languageId: "typescriptreact", candidates: [["typescript-language-server", ["--stdio"]]] };
+    case "html":
+    case "htm":
+    case "astro":
+    case "vue":
+    case "svelte":
+      return { serverKey: "html", languageId: "html", candidates: [["vscode-html-language-server", ["--stdio"]]] };
+    case "css":
+    case "scss":
+    case "less":
+      return { serverKey: "css", languageId: ext === "scss" ? "scss" : ext === "less" ? "less" : "css", candidates: [["vscode-css-language-server", ["--stdio"]]] };
+    case "json":
+    case "jsonc":
+      return { serverKey: "json", languageId: ext === "jsonc" ? "jsonc" : "json", candidates: [["vscode-json-language-server", ["--stdio"]]] };
+    case "dart":
+      return { serverKey: "dart", languageId: "dart", candidates: [["dart", ["language-server", "--protocol=lsp"]]] };
+    case "kt":
+    case "kts":
+      return { serverKey: "kotlin", languageId: "kotlin", candidates: [["kotlin-language-server", []]] };
+    case "java":
+      return { serverKey: "java", languageId: "java", candidates: [["jdtls", []]] };
+    case "swift":
+      return { serverKey: "swift", languageId: "swift", candidates: [["sourcekit-lsp", []]] };
+    case "rs":
+      return { serverKey: "rust", languageId: "rust", candidates: [["rust-analyzer", []]] };
+    case "py":
+    case "pyw":
+      return { serverKey: "python", languageId: "python", candidates: [["pyright-langserver", ["--stdio"]], ["pylsp", []]] };
+    case "go":
+      return { serverKey: "go", languageId: "go", candidates: [["gopls", []]] };
+    case "cs":
+      return { serverKey: "csharp", languageId: "csharp", candidates: [["csharp-ls", []], ["omnisharp", ["-lsp"]]] };
+    case "php":
+      return { serverKey: "php", languageId: "php", candidates: [["intelephense", ["--stdio"]], ["phpactor", ["language-server"]]] };
+    case "rb":
+      return { serverKey: "ruby", languageId: "ruby", candidates: [["ruby-lsp", []], ["solargraph", ["stdio"]]] };
+    case "lua":
+      return { serverKey: "lua", languageId: "lua", candidates: [["lua-language-server", []]] };
+    case "c":
+    case "h":
+      return { serverKey: "cpp", languageId: "c", candidates: [["clangd", []]] };
+    case "cpp":
+    case "hpp":
+    case "cc":
+    case "cxx":
+      return { serverKey: "cpp", languageId: "cpp", candidates: [["clangd", []]] };
+    case "sql":
+      return { serverKey: "sql", languageId: "sql", candidates: [["sqls", []]] };
+    case "yml":
+    case "yaml":
+      return { serverKey: "yaml", languageId: "yaml", candidates: [["yaml-language-server", ["--stdio"]]] };
+    case "toml":
+      return { serverKey: "toml", languageId: "toml", candidates: [["taplo", ["lsp", "stdio"]]] };
+    case "xml":
+    case "svg":
+    case "plist":
+    case "iml":
+      return { serverKey: "xml", languageId: "xml", candidates: [["lemminx", []]] };
+    case "md":
+    case "markdown":
+      return { serverKey: "markdown", languageId: "markdown", candidates: [["marksman", ["server"]]] };
+    case "sh":
+    case "bash":
+    case "zsh":
+      return { serverKey: "shell", languageId: "shellscript", candidates: [["bash-language-server", ["start"]]] };
+    default:
+      return null;
   }
 }

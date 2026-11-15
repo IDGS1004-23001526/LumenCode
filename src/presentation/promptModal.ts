@@ -1,8 +1,18 @@
 import { h } from "./dom";
 
-export function promptModal(label: string): Promise<string | null> {
+export function promptModal(
+    label: string,
+    options?: { initialValue?: string; confirmLabel?: string },
+): Promise<string | null> {
     return new Promise((resolve) => {
-        const input = h("input", { class: "field", spellcheck: "false", autocomplete: "off" }) as HTMLInputElement;
+        const initialValue = options?.initialValue ?? "";
+        const confirmLabel = options?.confirmLabel ?? "Crear";
+        const input = h("input", {
+            class: "field",
+            spellcheck: "false",
+            autocomplete: "off",
+            value: initialValue,
+        }) as HTMLInputElement;
 
         const dlg = h(
             "dialog",
@@ -12,7 +22,7 @@ export function promptModal(label: string): Promise<string | null> {
                 input,
                 h("div", { class: "modal-actions" },
                     h("button", { value: "cancel", class: "btn ghost" }, "Cancelar"),
-                    h("button", { value: "ok", class: "btn primary" }, "Crear"),
+                    h("button", { value: "ok", class: "btn primary" }, confirmLabel),
                 ),
             ),
         ) as HTMLDialogElement;
@@ -33,5 +43,9 @@ export function promptModal(label: string): Promise<string | null> {
         document.body.append(dlg);
         dlg.showModal();
         input.focus();
+        if (initialValue) {
+            const dot = initialValue.lastIndexOf(".");
+            input.setSelectionRange(0, dot > 0 ? dot : initialValue.length);
+        }
     });
 }

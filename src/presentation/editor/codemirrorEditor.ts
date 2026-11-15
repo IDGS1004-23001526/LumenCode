@@ -2,11 +2,16 @@ import { EditorState } from "@codemirror/state";
 import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection, dropCursor, rectangularSelection, placeholder, ViewPlugin, ViewUpdate, scrollPastEnd } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { bracketMatching, foldGutter, foldKeymap, indentOnInput, indentUnit, syntaxHighlighting } from "@codemirror/language";
-import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from "@codemirror/autocomplete";
+import { acceptCompletion, autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from "@codemirror/autocomplete";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
 
 import type { ProjectIndex } from "../../domain/symbolIndex";
-import { createSmartCompletionSource } from "./smartCompletion";
+import { lspClient } from "../../infraestructure/lspClient";
+import { createHtmlEmmetCompletionSource, expandHtmlEmmetAtCursor } from "./htmlEmmetCompletion";
+import { createLspCompletionSource, createLspHoverExtension } from "./lspExtension";
+import { createPasteIndentExtension } from "./pasteIndent";
+import { errorLensExtension, lspDiagnosticsToLumen, setDiagnosticsEffect } from "./errorLens";
+import { createImagePreviewHost, type ImageEntry } from "./imagePreview";
 
 import type { EditorPort } from "../../application/ports";
 // import { languageFor } from "./languages";
@@ -16,6 +21,7 @@ import { languageFor } from "./languages";
 export interface EditorCallbacks {
     onChange: (path: string, content: string) => void;
     getIndex: () => ProjectIndex;
+    getRootPath: () => string | null;
 }
 
 const smoothCaret = ViewPlugin.fromClass(
@@ -169,46 +175,133 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
                 EditorState.allowMultipleSelections.of(true),
                 indentUnit.of("     "),
                 indentOnInput(),
+                createPasteIndentExtension(() => path),
                 bracketMatching(),
                 closeBrackets(),
                 autocompletion({
                     activateOnTyping: true,
+                    activateOnTypingDelay: 35,
                     maxRenderedOptions: 25,
                     defaultKeymap: true,
-                    override: [createSmartCompletionSource(cb.getIndex, () => path)],
                 }),
+                EditorState.languageData.of(() => [
+                    { autocomplete: createLspCompletionSource(cb.getIndex, () => path) },
+                    { autocomplete: createHtmlEmmetCompletionSource(() => path) },
+                ]),
+                createLspHoverExtension(() => path),
+                errorLensExtension(() => path),
                 rectangularSelection(),
                 highlightActiveLine(),
                 highlightSelectionMatches(),
                 keymap.of([
                     ...closeBracketsKeymap, ...defaultKeymap, ...searchKeymap,
-                    ...historyKeymap, ...foldKeymap, ...completionKeymap, indentWithTab,
+                    ...historyKeymap, ...foldKeymap, ...completionKeymap,
+                    { key: "Tab", run: (v) => acceptCompletion(v) || expandHtmlEmmetAtCursor(v, path) },
+                    indentWithTab,
                 ]),
                 lumenTheme,
                 syntaxHighlighting(lumenHighlight),
                 languageFor(path).support,
                 EditorView.updateListener.of((u) => {
-                    if (u.docChanged) cb.onChange(path, u.state.doc.toString());
+                    if (u.docChanged) {
+                        const text = u.state.doc.toString();
+                        cb.onChange(path, text);
+                        lspClient.changeDocument(path, text);
+                    }
                 }),
             ],
         });
 
     const view = new EditorView({ parent, state: empty });
+    const images = new Map<string, ImageEntry>();
+    const imageViewer = createImagePreviewHost(parent);
+
+    lspClient.onDiagnostics((diagPath, lspDiags) => {
+        if (diagPath === active) {
+            const lumenDiags = lspDiagnosticsToLumen(view.state.doc, lspDiags);
+            view.dispatch({ effects: setDiagnosticsEffect.of(lumenDiags) });
+        } else {
+            const st = states.get(diagPath);
+            if (st) {
+                const lumenDiags = lspDiagnosticsToLumen(st.doc, lspDiags);
+                states.set(diagPath, st.update({ effects: setDiagnosticsEffect.of(lumenDiags) }).state);
+            }
+        }
+    });
 
     return {
         open(path, content) {
             states.set(path, build(path, content));
+            void lspClient.openDocument(path, content, cb.getRootPath());
+        },
+        openImage(path, url, byteSize) {
+            const prev = images.get(path);
+            if (prev) URL.revokeObjectURL(prev.url);
+            images.set(path, { path, url, byteSize, zoom: 0 });
         },
         activate(path) {
             if (active && active !== path && states.has(active)) states.set(active, view.state); // Guarda la pestaña saliente
             active = path;
+
+            const img = path ? images.get(path) : undefined;
+            if (img) {
+                view.dom.hidden = true;
+                imageViewer.show(img);
+                return;
+            }
+
+            imageViewer.hide();
+            view.dom.hidden = false;
             const next = path ? states.get(path) : undefined;
             view.setState(next ?? empty);
             if (next) view.focus();
         },
+        rename(oldPath, newPath) {
+            const img = images.get(oldPath);
+            if (img) {
+                const updated: ImageEntry = { ...img, path: newPath };
+                images.delete(oldPath);
+                images.set(newPath, updated);
+                if (active === oldPath) {
+                    active = newPath;
+                    imageViewer.show(updated);
+                }
+                return;
+            }
+
+            const isActive = active === oldPath;
+            const prevState = isActive ? view.state : states.get(oldPath);
+            if (!prevState) return;
+
+            const content = prevState.doc.toString();
+            const selection = prevState.selection;
+            const rebuilt = build(newPath, content).update({ selection }).state;
+
+            states.delete(oldPath);
+            states.set(newPath, rebuilt);
+            lspClient.closeDocument(oldPath);
+            void lspClient.openDocument(newPath, content, cb.getRootPath());
+
+            if (isActive) {
+                active = newPath;
+                view.setState(rebuilt);
+            }
+        },
         close(path) {
+            const img = images.get(path);
+            if (img) {
+                URL.revokeObjectURL(img.url);
+                images.delete(path);
+                if (active === path) {
+                    active = null;
+                    imageViewer.hide();
+                    view.dom.hidden = false;
+                }
+                return;
+            }
             states.delete(path);
             if (active === path) active = null;
+            lspClient.closeDocument(path);
         },
         getText(path) {
             const state = path === active ? view.state : states.get(path);

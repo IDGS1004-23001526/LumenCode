@@ -3,22 +3,26 @@ import type { FileNode, Settings } from "../domain/types";
 export interface FileSystemPort {
   readDir(path: string): Promise<FileNode[]>;
   readText(path: string): Promise<string>;
+  readBinary(path: string): Promise<Uint8Array>;
   writeText(path: string, content: string): Promise<void>;
   mkdir(path: string): Promise<void>;
   exists(path: string): Promise<boolean>;
   remove(path: string): Promise<void>;
+  rename(oldPath: string, newPath: string): Promise<void>;
 }
 
 export interface DialogPort {
   pickFolder(): Promise<string | null>;
   confirm(message: string, okLabel?: string): Promise<boolean>;
   error(message: string): Promise<void>;
-  prompt(label: string): Promise<string | null>;
+  prompt(label: string, options?: { initialValue?: string; confirmLabel?: string }): Promise<string | null>;
 }
 
 export interface EditorPort {
   open(path: string, content: string): void;
+  openImage(path: string, url: string, byteSize: number): void;
   activate(path: string | null): void;
+  rename(oldPath: string, newPath: string): void;
   close(path: string): void;
   getText(path: string): string;
   focus(): void;

@@ -1,5 +1,12 @@
-import type { ExtensionManifest, ThemeManifest } from "../domain/types";
+import type { ExtensionManifest, IconThemeManifest, ThemeManifest } from "../domain/types";
 import { BUILTIN_THEMES, loadCustomThemes, removeCustomTheme, saveCustomTheme } from "./themeRepository";
+import {
+  BUILTIN_ICON_THEMES,
+  cloneBaseIconMaps,
+  loadCustomIconThemes,
+  removeCustomIconTheme,
+  saveCustomIconTheme,
+} from "./iconThemeRepository";
 
 const INSTALLED_KEY = "lumen.installedExtensions.v1";
 
@@ -97,10 +104,87 @@ export const COMMUNITY_EXTENSIONS: ExtensionManifest[] = [
       },
     },
   },
+  {
+    id: "ext-material-vivid-icons",
+    name: "Material Vivid Icons",
+    author: "Lumen Community",
+    version: "1.1.0",
+    category: "IconTheme",
+    summary: "Paquete de iconos vibrantes estilo Material para archivos y carpetas semánticas (routes, utils, context, components).",
+    readme:
+      "Material Vivid Icons aporta colores vibrantes y alto contraste para distinguir al instante cada tecnología y carpeta del proyecto.\n\n• Carpetas semánticas: src, routes, utils, context, pages, hooks, api, styles, tests.\n• Archivos por tecnología: TS, React, JS, Python, Rust, C#, Go, Docker, Git y más.",
+    iconTheme: (() => {
+      const base = cloneBaseIconMaps();
+      return {
+        id: "material-vivid-icons",
+        name: "Material Vivid Icons",
+        author: "Lumen Community",
+        vars: {
+          ...base.vars,
+          "--icon-folder": "#64B5F6",
+          "--icon-folder-src": "#42A5F5",
+          "--icon-folder-components": "#26C6DA",
+          "--icon-folder-routes": "#66BB6A",
+          "--icon-folder-utils": "#FFA726",
+          "--icon-folder-context": "#AB47BC",
+          "--icon-folder-pages": "#5C6BC0",
+          "--icon-folder-api": "#26A69A",
+          "--icon-folder-styles": "#EC407A",
+          "--icon-folder-assets": "#9CCC65",
+          "--icon-folder-tests": "#FF7043",
+        },
+        defaultFile: { color: "var(--fg-muted)" },
+        defaultFolder: { color: "var(--icon-folder)" },
+        fileNames: base.fileNames,
+        fileExtensions: base.fileExtensions,
+        folderNames: base.folderNames,
+      };
+    })(),
+  },
+  {
+    id: "ext-minimal-mono-icons",
+    name: "Minimal Mono Icons",
+    author: "Lumen Community",
+    version: "1.0.0",
+    category: "IconTheme",
+    summary: "Iconos monocromáticos minimalistas que heredan el color de acento del tema activo.",
+    readme:
+      "Minimal Mono Icons reduce el ruido visual manteniendo los símbolos por tecnología y carpeta pero usando exclusivamente los colores del tema activo (--accent y --fg-muted).",
+    iconTheme: (() => {
+      const base = cloneBaseIconMaps();
+      const monoMap = (m: Record<string, { color: string; badge?: string }>, color: string) =>
+        Object.fromEntries(Object.entries(m).map(([k, v]) => [k, { ...v, color }]));
+      return {
+        id: "minimal-mono-icons",
+        name: "Minimal Mono Icons",
+        author: "Lumen Community",
+        vars: {
+          "--icon-folder": "var(--fg-muted)",
+          "--icon-folder-src": "var(--accent)",
+          "--icon-folder-components": "var(--accent)",
+          "--icon-folder-routes": "var(--accent)",
+          "--icon-folder-utils": "var(--fg-muted)",
+          "--icon-folder-context": "var(--accent)",
+          "--icon-folder-pages": "var(--fg-muted)",
+          "--icon-folder-api": "var(--accent)",
+          "--icon-folder-styles": "var(--fg-muted)",
+          "--icon-folder-assets": "var(--fg-muted)",
+          "--icon-folder-tests": "var(--fg-muted)",
+          "--icon-folder-git": "var(--accent)",
+          "--icon-folder-muted": "var(--fg-faint)",
+        },
+        defaultFile: { color: "var(--fg-muted)" },
+        defaultFolder: { color: "var(--fg-muted)" },
+        fileNames: monoMap(base.fileNames, "var(--fg-muted)"),
+        fileExtensions: monoMap(base.fileExtensions, "var(--accent)"),
+        folderNames: base.folderNames,
+      };
+    })(),
+  },
 ];
 
 function builtinToExtensions(): ExtensionManifest[] {
-  return BUILTIN_THEMES.map((t) => ({
+  const themeExts: ExtensionManifest[] = BUILTIN_THEMES.map((t) => ({
     id: `builtin-${t.id}`,
     name: t.name,
     author: t.author,
@@ -111,6 +195,20 @@ function builtinToExtensions(): ExtensionManifest[] {
     theme: t,
     builtin: true,
   }));
+
+  const iconExts: ExtensionManifest[] = BUILTIN_ICON_THEMES.map((it) => ({
+    id: `builtin-icon-${it.id}`,
+    name: it.name,
+    author: it.author,
+    version: "1.0.0",
+    category: "IconTheme",
+    summary: it.description ?? "Paquete de iconos integrado de LumenCode.",
+    readme: `${it.name} incluye iconos por defecto de LumenCode para tecnologías y carpetas semánticas (src, routes, components, utils, context, pages, api, styles, tests, etc.).`,
+    iconTheme: it,
+    builtin: true,
+  }));
+
+  return [...themeExts, ...iconExts];
 }
 
 export function loadInstalledExtensionIds(): Set<string> {
@@ -119,9 +217,13 @@ export function loadInstalledExtensionIds(): Set<string> {
     const ids = raw ? (JSON.parse(raw) as string[]) : [];
     const set = new Set(Array.isArray(ids) ? ids : []);
     for (const b of BUILTIN_THEMES) set.add(`builtin-${b.id}`);
+    for (const it of BUILTIN_ICON_THEMES) set.add(`builtin-icon-${it.id}`);
     return set;
   } catch {
-    return new Set(BUILTIN_THEMES.map((b) => `builtin-${b.id}`));
+    return new Set([
+      ...BUILTIN_THEMES.map((b) => `builtin-${b.id}`),
+      ...BUILTIN_ICON_THEMES.map((it) => `builtin-icon-${it.id}`),
+    ]);
   }
 }
 
@@ -132,7 +234,9 @@ function saveInstalledIds(ids: Set<string>): void {
 export function getCatalogExtensions(): ExtensionManifest[] {
   const builtins = builtinToExtensions();
   const communityThemeIds = new Set(COMMUNITY_EXTENSIONS.map((e) => e.theme?.id).filter(Boolean));
-  const localCustom: ExtensionManifest[] = loadCustomThemes()
+  const communityIconIds = new Set(COMMUNITY_EXTENSIONS.map((e) => e.iconTheme?.id).filter(Boolean));
+
+  const localThemes: ExtensionManifest[] = loadCustomThemes()
     .filter((t) => !communityThemeIds.has(t.id))
     .map((t: ThemeManifest) => ({
       id: `local-${t.id}`,
@@ -145,11 +249,24 @@ export function getCatalogExtensions(): ExtensionManifest[] {
       theme: t,
     }));
 
-  return [...COMMUNITY_EXTENSIONS, ...localCustom, ...builtins];
+  const localIcons: ExtensionManifest[] = loadCustomIconThemes()
+    .filter((it) => !communityIconIds.has(it.id))
+    .map((it: IconThemeManifest) => ({
+      id: `local-icon-${it.id}`,
+      name: it.name,
+      author: it.author,
+      version: "local",
+      category: "IconTheme",
+      summary: "Paquete de iconos importado localmente desde archivo .json.",
+      readme: `Paquete de iconos importado desde un archivo .json local.\n\nAutor: ${it.author}`,
+      iconTheme: it,
+    }));
+
+  return [...COMMUNITY_EXTENSIONS, ...localThemes, ...localIcons, ...builtins];
 }
 
 export function isExtensionInstalled(ext: ExtensionManifest): boolean {
-  if (ext.builtin || ext.id.startsWith("local-")) return true;
+  if (ext.builtin || ext.id.startsWith("local-") || ext.id.startsWith("local-icon-")) return true;
   return loadInstalledExtensionIds().has(ext.id);
 }
 
@@ -158,6 +275,7 @@ export function installExtension(ext: ExtensionManifest): void {
   ids.add(ext.id);
   saveInstalledIds(ids);
   if (ext.theme) saveCustomTheme(ext.theme);
+  if (ext.iconTheme) saveCustomIconTheme(ext.iconTheme);
 }
 
 export function uninstallExtension(ext: ExtensionManifest): void {
@@ -166,4 +284,5 @@ export function uninstallExtension(ext: ExtensionManifest): void {
   ids.delete(ext.id);
   saveInstalledIds(ids);
   if (ext.theme) removeCustomTheme(ext.theme.id);
+  if (ext.iconTheme) removeCustomIconTheme(ext.iconTheme.id);
 }

@@ -46,6 +46,28 @@ const BINARY_EXT = new Set([
   "mp3", "mp4",
 ]);
 
+const IMAGE_MIME: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  svg: "image/svg+xml",
+  ico: "image/x-icon",
+  bmp: "image/bmp",
+  avif: "image/avif",
+};
+
+export const isImageFile = (path: string): boolean => {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  return ext in IMAGE_MIME;
+};
+
+export const imageMimeFor = (path: string): string => {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  return IMAGE_MIME[ext] ?? "application/octet-stream";
+};
+
 /** "Archivo válido" para abrir en el editor. */
 export const isTextFile = (path: string): boolean =>
   !BINARY_EXT.has(path.split(".").pop()?.toLowerCase() ?? "");

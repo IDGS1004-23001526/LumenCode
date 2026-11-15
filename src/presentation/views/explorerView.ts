@@ -3,23 +3,37 @@ import { fileNameOf, parentDirOf } from "../../domain/path";
 import type { AppStore } from "../../application/reducer";
 import type { UseCases } from "../../application/useCases";
 import { cx, h, iconButton } from "../dom";
-import { ICONS } from "../icons";
+import { ICONS, iconForFile, iconForFolder } from "../icons";
+import { findIconTheme } from "../../infraestructure/iconThemeRepository";
 import { showContextMenu } from "../contextMenu";
 
 export function mountExplorer(el: HTMLElement, store: AppStore, uc: UseCases) {
-    const treeEl = h("div", { class: "tree", role: "tree" });
+    const treeEl = h("div", { class: "tree", role: "tree", tabIndex: 0 });
+    let selectedNode: FileNode | null = null;
 
-    function openMenuAt(x: number, y: number, targetDir?: string, fileNode?: FileNode) {
+    treeEl.addEventListener("keydown", (e) => {
+        if (e.key === "F2" && selectedNode && selectedNode.path !== store.getState().rootPath) {
+            e.preventDefault();
+            void uc.renameEntry(selectedNode);
+        }
+    });
+
+    function openMenuAt(x: number, y: number, targetDir?: string, fileNode?: FileNode, isRoot = false) {
         const root = store.getState().rootPath;
         const noRoot = !root;
         const dir = targetDir ?? root ?? undefined;
         const folderLabel = dir ? ` (${fileNameOf(dir)})` : "";
 
         showContextMenu(x, y, [
-            ...(fileNode && !fileNode.isDir
+            ...(fileNode && !isRoot
                 ? [
-                    { label: `Abrir "${fileNode.name}"`, run: () => uc.openFile(fileNode.path) },
-                    { label: `Eliminar "${fileNode.name}"`, run: () => uc.deleteFile(fileNode) },
+                    ...(!fileNode.isDir
+                        ? [{ label: `Abrir "${fileNode.name}"`, run: () => uc.openFile(fileNode.path) }]
+                        : []),
+                    { label: `Renombrar "${fileNode.name}"`, shortcut: "F2", run: () => uc.renameEntry(fileNode) },
+                    ...(!fileNode.isDir
+                        ? [{ label: `Eliminar "${fileNode.name}"`, run: () => uc.deleteFile(fileNode) }]
+                        : []),
                     "separator" as const,
                   ]
                 : []),
@@ -54,8 +68,9 @@ export function mountExplorer(el: HTMLElement, store: AppStore, uc: UseCases) {
 
         if (node.isDir) chevron.innerHTML = ICONS.chevron;
 
+        const iconTheme = findIconTheme(s.settings.iconTheme);
         const icon = h("span", { class: "node-icon" });
-        icon.innerHTML = node.isDir ? ICONS.folder : ICONS.file;
+        icon.innerHTML = node.isDir ? iconForFolder(node.name, open, iconTheme) : iconForFile(node.name, iconTheme);
 
         const row = h(
             "div",
@@ -65,12 +80,16 @@ export function mountExplorer(el: HTMLElement, store: AppStore, uc: UseCases) {
                 title: node.path,
                 role: "treeitem",
                 "aria-expanded": node.isDir ? String(open) : undefined,
-                onclick: () => void (node.isDir ? uc.toggleFolder(node) : uc.openFile(node.path)),
+                onclick: () => {
+                    selectedNode = isRoot ? null : node;
+                    void (node.isDir ? uc.toggleFolder(node) : uc.openFile(node.path));
+                },
                 oncontextmenu: (e: MouseEvent) => {
                     e.preventDefault();
                     e.stopPropagation();
+                    selectedNode = isRoot ? null : node;
                     const targetDir = node.isDir ? node.path : parentDirOf(node.path);
-                    openMenuAt(e.clientX, e.clientY, targetDir, node);
+                    openMenuAt(e.clientX, e.clientY, targetDir, node, isRoot);
                 },
             },
             chevron, icon, h("span", { class: "label" }, node.name),
@@ -100,6 +119,14 @@ export function mountExplorer(el: HTMLElement, store: AppStore, uc: UseCases) {
 
     render(store.getState());
     store.subscribe((s, p) => {
-        if (s.tree !== p.tree || s.expanded !== p.expanded || s.rootPath !== p.rootPath || s.activePath !== p.activePath) render(s);
+        if (
+            s.tree !== p.tree ||
+            s.expanded !== p.expanded ||
+            s.rootPath !== p.rootPath ||
+            s.activePath !== p.activePath ||
+            s.settings.iconTheme !== p.settings.iconTheme
+        ) {
+            render(s);
+        }
     });
 }

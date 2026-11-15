@@ -1,4 +1,5 @@
 import type { Completion, CompletionContext, CompletionResult } from "@codemirror/autocomplete";
+import { htmlLanguage } from "@codemirror/lang-html";
 import type { EditorView } from "@codemirror/view";
 import { fileNameOf } from "../../domain/path";
 import {
@@ -21,6 +22,12 @@ export function createSmartCompletionSource(getIndex: () => ProjectIndex, getAct
   return (ctx: CompletionContext): CompletionResult | null => {
     const activePath = getActivePath();
     if (!activePath) return null;
+
+    const ext = activePath.split(".").pop()?.toLowerCase() ?? "";
+    const isHtmlMarkup = ["html", "htm", "astro", "vue", "svelte", "xml", "svg"].includes(ext)
+      && htmlLanguage.isActiveAt(ctx.state, ctx.pos, -1);
+    const isNonCodeDoc = ["css", "scss", "less", "json", "jsonc", "md", "yaml", "yml", "toml"].includes(ext);
+    if (isHtmlMarkup || isNonCodeDoc) return null;
 
     const index = getIndex();
     const docText = ctx.state.doc.toString();
@@ -112,7 +119,6 @@ export function createSmartCompletionSource(getIndex: () => ProjectIndex, getAct
     }
 
     // 3b. Símbolos y módulos de paquetes instalados (ej. `React`, `useState`, `useEffect`, `useReducer`, crates, pip)
-    const ext = activePath.split(".").pop()?.toLowerCase() ?? "";
     const eco = ext === "py" ? "pip" : ext === "rs" ? "cargo" : "npm";
 
     for (const pkgSym of index.packageSymbols) {
@@ -132,7 +138,7 @@ export function createSmartCompletionSource(getIndex: () => ProjectIndex, getAct
       });
     }
 
-    // 3c. Símbolos e identificadores del propio archivo actual
+    // 3c. Símbolos, variables declaradas e identificadores del propio archivo actual
     if (!isInsideImportLine) {
       for (const sym of extractFileSymbols(activePath, docText)) {
         if (seen.has(sym.name)) continue;
@@ -141,14 +147,47 @@ export function createSmartCompletionSource(getIndex: () => ProjectIndex, getAct
           label: sym.name,
           type: sym.kind,
           detail: "este archivo",
-          boost: 35,
+          boost: 55,
+        });
+      }
+
+      for (const local of collectLocalDeclarations(docText)) {
+        if (seen.has(local.name)) continue;
+        seen.add(local.name);
+        options.push({
+          label: local.name,
+          type: local.kind,
+          detail: "variable local",
+          boost: 60,
+        });
+      }
+
+      // Identificadores generales del archivo (excluye el token que se está escribiendo)
+      for (const ident of collectDocumentWords(docText, word.from, word.to)) {
+        if (seen.has(ident)) continue;
+        seen.add(ident);
+        options.push({
+          label: ident,
+          type: "text",
+          detail: "en este archivo",
+          boost: 25,
         });
       }
 
       // Palabras clave del lenguaje activo
+      const isJsLike = ["js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx"].includes(ext);
       const langGroup =
-        ext === "py" ? "py" : ext === "rs" ? "rs" : ["c", "h", "cpp", "hpp", "cc"].includes(ext) ? "cpp" : "js";
+        ext === "py" || ext === "pyw"
+          ? "py"
+          : ext === "rs"
+            ? "rs"
+            : ["c", "h", "cpp", "hpp", "cc"].includes(ext)
+              ? "cpp"
+              : isJsLike
+                ? "js"
+                : "";
       for (const kw of LANG_KEYWORDS[langGroup] ?? []) {
+        if (seen.has(kw)) continue;
         options.push({ label: kw, type: "keyword", boost: 5 });
       }
     }
@@ -268,4 +307,75 @@ function findImportInsertOffset(doc: string): number {
   }
 
   return lastImportEnd;
+}
+
+function collectLocalDeclarations(doc: string): { name: string; kind: string }[] {
+  const out: { name: string; kind: string }[] = [];
+  const seen = new Set<string>();
+  const add = (name: string, kind: string) => {
+    if (!name || name.length < 2 || seen.has(name)) return;
+    seen.add(name);
+    out.push({ name, kind });
+  };
+
+  let m: RegExpExecArray | null;
+
+  // Variables simples y desestructuradas: const/let/var/val/mut/final
+  const varDecl = /\b(?:const|let|var|val|final)\s+(?:mut\s+)?(\[[^\]]+\]|\{[^}]+\}|[A-Za-z_$][\w$]*)/g;
+  while ((m = varDecl.exec(doc)) !== null) {
+    const raw = m[1];
+    if (raw.startsWith("[") || raw.startsWith("{")) {
+      for (const id of raw.match(/[A-Za-z_$][\w$]*/g) ?? []) add(id, "variable");
+    } else {
+      add(raw, "variable");
+    }
+  }
+
+  // Funciones, clases, interfaces, tipos, enums, structs (JS/TS/Py/Rust/Go/PHP/etc.)
+  const fnOrType = /\b(?:function\*?|def|fn|func|class|struct|interface|type|enum)\s+([A-Za-z_$][\w$]*)/g;
+  while ((m = fnOrType.exec(doc)) !== null) {
+    const kind = m[0].startsWith("class") || m[0].startsWith("struct") ? "class" : "function";
+    add(m[1], kind);
+  }
+
+  // Asignaciones directas estilo Python / Go (`x := ...` o `x = ...` al inicio de línea)
+  const assignDecl = /^[ \t]*([A-Za-z_][\w]*)\s*:?=\s*[^=]/gm;
+  while ((m = assignDecl.exec(doc)) !== null) {
+    add(m[1], "variable");
+  }
+
+  // Variables tipadas estilo C# / Java / Dart / C++ (`Type name =` o `Type name;`)
+  const typedDecl = /^[ \t]*(?:private|public|protected|internal|static|readonly|final|late|var)?\s*[A-Za-z_][\w<>, ?[\]]*\s+([A-Za-z_][\w]*)\s*(?:=|;)/gm;
+  while ((m = typedDecl.exec(doc)) !== null) {
+    if (!["return", "import", "package", "using", "namespace", "throw", "yield"].includes(m[1])) {
+      add(m[1], "variable");
+    }
+  }
+
+  // Símbolos importados localmente en el archivo
+  const importDecl = /\bimport\s+([^;\n]+?)\s+from\b/g;
+  while ((m = importDecl.exec(doc)) !== null) {
+    for (const id of m[1].match(/[A-Za-z_$][\w$]*/g) ?? []) {
+      if (id !== "type" && id !== "as") add(id, "variable");
+    }
+  }
+
+  return out;
+}
+
+function collectDocumentWords(doc: string, curFrom: number, curTo: number): string[] {
+  const seen = new Set<string>();
+  const words: string[] = [];
+  const regex = /[A-Za-z_$][\w$]{1,}/g;
+  let m: RegExpExecArray | null;
+  while ((m = regex.exec(doc)) !== null) {
+    if (m.index === curFrom && m.index + m[0].length === curTo) continue;
+    const w = m[0];
+    if (!seen.has(w)) {
+      seen.add(w);
+      words.push(w);
+      if (words.length >= 250) break;
+    }
+  }
+  return words;
 }

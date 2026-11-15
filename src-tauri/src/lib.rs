@@ -1,9 +1,11 @@
+mod lsp;
+
 use serde::Serialize;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 #[derive(Default)]
 struct RunningPid(Arc<Mutex<Option<u32>>>);
@@ -264,9 +266,88 @@ async fn terminal_exec(
 pub fn run() {
     tauri::Builder::default()
         .manage(RunningPid::default())
+        .manage(lsp::LspRegistry::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .invoke_handler(tauri::generate_handler![terminal_init, terminal_exec, terminal_kill])
-        .run(tauri::generate_context!())
-        .expect("error al ejecutar la aplicación Lumen");
+        .setup(|app| {
+            let window = tauri::WebviewWindowBuilder::new(
+                app,
+                "main",
+                tauri::WebviewUrl::App("index.html".into()),
+            )
+            .title("LumenCode")
+            .inner_size(1100.0, 720.0)
+            .min_inner_size(520.0, 360.0)
+            .decorations(false)
+            .center()
+            .devtools(false)
+            .build()?;
+
+            #[cfg(target_os = "windows")]
+            {
+                let _ = window.with_webview(|webview| unsafe {
+                    use webview2_com::AcceleratorKeyPressedEventHandler;
+                    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
+                    use windows::core::Interface;
+                    use windows::Win32::UI::Input::KeyboardAndMouse::{
+                        GetKeyState, VK_CONTROL, VK_F12, VK_F5, VK_F7, VK_SHIFT,
+                    };
+
+                    let controller = webview.controller();
+                    if let Ok(core) = controller.CoreWebView2() {
+                        if let Ok(settings) = core.Settings() {
+                            let _ = settings.SetAreDevToolsEnabled(false);
+                            let _ = settings.SetIsZoomControlEnabled(false);
+                            if let Ok(settings3) = settings.cast::<ICoreWebView2Settings3>() {
+                                let _ = settings3.SetAreBrowserAcceleratorKeysEnabled(false);
+                            }
+                        }
+                    }
+
+                    let mut token = 0i64;
+                    let handler = AcceleratorKeyPressedEventHandler::create(Box::new(
+                        move |_ctrl, args| {
+                            if let Some(args) = args {
+                                let mut vkey = 0u32;
+                                if args.VirtualKey(&mut vkey).is_ok() {
+                                    let ctrl = GetKeyState(VK_CONTROL.0 as i32) < 0;
+                                    let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
+                                    let is_devtools_combo = ctrl
+                                        && shift
+                                        && matches!(vkey, 0x49 | 0x4A | 0x43); // I, J, C
+                                    let is_blocked_fn = vkey == VK_F12.0 as u32
+                                        || vkey == VK_F5.0 as u32
+                                        || vkey == VK_F7.0 as u32;
+
+                                    if is_devtools_combo || is_blocked_fn {
+                                        let _ = args.SetHandled(true);
+                                    }
+                                }
+                            }
+                            Ok(())
+                        },
+                    ));
+                    let _ = controller.add_AcceleratorKeyPressed(&handler, &mut token);
+                });
+            }
+
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            terminal_init,
+            terminal_exec,
+            terminal_kill,
+            lsp::lsp_start,
+            lsp::lsp_send,
+            lsp::lsp_stop,
+            lsp::lsp_stop_all
+        ])
+        .build(tauri::generate_context!())
+        .expect("error al construir la aplicación Lumen")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                let registry = app_handle.state::<lsp::LspRegistry>();
+                lsp::stop_all_processes(&registry);
+            }
+        });
 }

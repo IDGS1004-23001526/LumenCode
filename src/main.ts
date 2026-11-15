@@ -15,12 +15,15 @@ import { createTauriDialogs } from "./infraestructure/tauriDialogs";
 import { NativeTerminal } from "./infraestructure/nativeTerminal";
 import { localSettingsRepository } from "./infraestructure/localSettingsRepository";
 import { findTheme } from "./infraestructure/themeRepository";
+import { findIconTheme } from "./infraestructure/iconThemeRepository";
+import { lspClient } from "./infraestructure/lspClient";
 import { setAnimationsEnabled } from "./presentation/animate";
 
 import { createCodeMirrorEditor } from "./presentation/editor/codemirrorEditor";
 import { promptModal } from "./presentation/promptModal";
 import { registerShortcuts } from "./presentation/shortcuts";
 import { mountExplorer } from "./presentation/views/explorerView";
+import { mountTitlebar } from "./presentation/views/titlebarView";
 import { mountTabBar } from "./presentation/editor/tabBarView";
 import { mountBottomPanel } from "./presentation/editor/bottomPanelView";
 import { mountSettingsModal } from "./presentation/editor/settingsModal";
@@ -44,12 +47,14 @@ const editor = createCodeMirrorEditor($("editor"), {
     indexer.updateFile(path, content);
   },
   getIndex: () => indexer.index,
+  getRootPath: () => store.getState().rootPath,
 });
 
 // Casos de uso
 const uc = createUseCases({ store, fs, dialogs, editor, terminal, indexer });
 
 // Vistas
+mountTitlebar($("titlebar"), store);
 mountExplorer($("sidebar"), store, uc);
 mountTabBar($("tabbar"), store, uc);
 mountBottomPanel($("panel"), store, terminal);
@@ -58,6 +63,7 @@ registerShortcuts(store, uc);
 
 // Efectos globales derivados del estado
 let appliedThemeVars: string[] = [];
+let appliedIconVars: string[] = [];
 
 function applySettings(s: Settings) {
   setAnimationsEnabled(s.animations ?? true);
@@ -72,8 +78,16 @@ function applySettings(s: Settings) {
   root.setProperty("--fg-faint", activeTheme.colors["--fg-faint"] ?? activeTheme.colors["--fg-muted"] ?? "#9aa5b1");
   root.colorScheme = activeTheme.dark ? "dark" : "light";
 
+  const activeIconTheme = findIconTheme(s.iconTheme);
+  for (const k of appliedIconVars) root.removeProperty(k);
+  appliedIconVars = Object.keys(activeIconTheme.vars ?? {});
+  for (const [varName, value] of Object.entries(activeIconTheme.vars ?? {})) {
+    root.setProperty(varName, value);
+  }
+
   root.setProperty("--editor-font", s.fontFamily);
   root.setProperty("--editor-font-size", `${s.fontSize}px`);
+  root.setProperty("--ui-font-size", `${Math.max(10, Math.min(20, s.fontSize))}px`);
   root.setProperty(
     "--cursor-transition",
     s.cursorSmooth ? "left 85ms cubic-bezier(0.22, 1, 0.36, 1), top 85ms cubic-bezier(0.22, 1, 0.36, 1)" : "none",
@@ -92,6 +106,7 @@ function applySettings(s: Settings) {
 }
 
 store.subscribe((s, p) => {
+  if (s.rootPath !== p.rootPath) void lspClient.stopAll();
   if (s.activePath !== p.activePath) editor.activate(s.activePath);
   if (s.settings !== p.settings) applySettings(s.settings);
   if (s.sidebarVisible !== p.sidebarVisible) $("app").classList.toggle("no-sidebar", !s.sidebarVisible);
@@ -114,7 +129,7 @@ void appWin.onCloseRequested(async (event) => {
     );
     if (!ok) return;
   }
-  await terminal.kill().catch(() => {});
+  await Promise.allSettled([terminal.kill(), lspClient.stopAll()]);
   await appWin.destroy();
 });
 
