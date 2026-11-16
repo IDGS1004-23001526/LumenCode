@@ -290,7 +290,7 @@ pub fn run() {
                     use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
                     use windows::core::Interface;
                     use windows::Win32::UI::Input::KeyboardAndMouse::{
-                        GetKeyState, VK_CONTROL, VK_F12, VK_F5, VK_F7, VK_SHIFT,
+                        GetKeyState, VK_CONTROL, VK_F5, VK_F7, VK_SHIFT,
                     };
 
                     let controller = webview.controller();
@@ -315,9 +315,8 @@ pub fn run() {
                                     let is_devtools_combo = ctrl
                                         && shift
                                         && matches!(vkey, 0x49 | 0x4A | 0x43); // I, J, C
-                                    let is_blocked_fn = vkey == VK_F12.0 as u32
-                                        || vkey == VK_F5.0 as u32
-                                        || vkey == VK_F7.0 as u32;
+                                    let is_blocked_fn =
+                                        vkey == VK_F5.0 as u32 || vkey == VK_F7.0 as u32;
 
                                     if is_devtools_combo || is_blocked_fn {
                                         let _ = args.SetHandled(true);

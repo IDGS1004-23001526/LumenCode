@@ -22,6 +22,7 @@ export interface EditorPort {
   open(path: string, content: string): void;
   openImage(path: string, url: string, byteSize: number): void;
   activate(path: string | null): void;
+  revealPosition(path: string, line: number, character: number): void;
   rename(oldPath: string, newPath: string): void;
   close(path: string): void;
   getText(path: string): string;

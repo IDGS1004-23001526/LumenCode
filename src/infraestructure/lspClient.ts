@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { normalizePath } from "../domain/path";
 import { lspSpecFor, type LspServerSpec } from "../presentation/editor/languages";
 
 export interface LspCompletionItem {
@@ -25,6 +26,23 @@ export interface LspDiagnostic {
   severity?: number; // 1=Error, 2=Warning, 3=Info, 4=Hint
   message: string;
   source?: string;
+}
+
+export interface LspLocation {
+  path: string;
+  line: number;
+  character: number;
+}
+
+interface RawLspLocation {
+  uri: string;
+  range: { start: { line: number; character: number } };
+}
+
+interface RawLspLocationLink {
+  targetUri: string;
+  targetSelectionRange?: { start: { line: number; character: number } };
+  targetRange: { start: { line: number; character: number } };
 }
 
 type DiagnosticsListener = (path: string, diagnostics: LspDiagnostic[]) => void;
@@ -61,6 +79,13 @@ export function pathToUri(path: string): string {
     return `file:///${normalized}`;
   }
   return normalized.startsWith("/") ? `file://${normalized}` : `file:///${normalized}`;
+}
+
+export function uriToPath(uri: string): string {
+  if (!uri.startsWith("file://")) return uri;
+  let raw = decodeURIComponent(uri.slice("file://".length));
+  if (/^\/[A-Za-z]:/.test(raw)) raw = raw.slice(1);
+  return normalizePath(raw);
 }
 
 class LspClientManager {
@@ -358,6 +383,42 @@ class LspClientManager {
       });
       if (!res || !res.contents) return null;
       return formatHoverContents(res.contents);
+    } catch {
+      return null;
+    }
+  }
+
+  async definition(path: string, line: number, character: number): Promise<LspLocation | null> {
+    const doc = this.openDocs.get(path);
+    if (!doc) return null;
+    const session = this.sessions.get(doc.serverKey);
+    if (!session || !session.initialized) return null;
+
+    try {
+      const res = await this.sendRequest<
+        RawLspLocation | RawLspLocation[] | RawLspLocationLink[] | null
+      >(session, "textDocument/definition", {
+        textDocument: { uri: doc.uri },
+        position: { line, character },
+      });
+      if (!res) return null;
+      const first = Array.isArray(res) ? res[0] : res;
+      if (!first) return null;
+
+      if ("targetUri" in first) {
+        const range = first.targetSelectionRange ?? first.targetRange;
+        return {
+          path: uriToPath(first.targetUri),
+          line: range.start.line,
+          character: range.start.character,
+        };
+      }
+
+      return {
+        path: uriToPath(first.uri),
+        line: first.range.start.line,
+        character: first.range.start.character,
+      };
     } catch {
       return null;
     }

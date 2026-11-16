@@ -128,6 +128,14 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 /* Editor */
 .editor-host { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; padding-top: 6px; }
 .editor-host .cm-editor { flex: 1; min-height: 0; height: 100%; }
+.cm-ctrl-down .cm-content { cursor: pointer; }
+.cm-def-link,
+.cm-def-link span {
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+  text-underline-offset: 2px;
+  color: var(--accent) !important;
+}
 .editor-host .cm-content, .terminal { user-select: text; }
 
 /* Panel inferior */

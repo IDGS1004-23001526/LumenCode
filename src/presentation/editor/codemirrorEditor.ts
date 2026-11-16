@@ -1,4 +1,4 @@
-import { EditorState } from "@codemirror/state";
+import { EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection, dropCursor, rectangularSelection, placeholder, ViewPlugin, ViewUpdate, scrollPastEnd } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { bracketMatching, foldGutter, foldKeymap, indentOnInput, indentUnit, syntaxHighlighting } from "@codemirror/language";
@@ -8,7 +8,7 @@ import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
 import type { ProjectIndex } from "../../domain/symbolIndex";
 import { lspClient } from "../../infraestructure/lspClient";
 import { createHtmlEmmetCompletionSource, expandHtmlEmmetAtCursor } from "./htmlEmmetCompletion";
-import { createLspCompletionSource, createLspHoverExtension } from "./lspExtension";
+import { createLspCompletionSource, createLspDefinitionExtension, createLspHoverExtension } from "./lspExtension";
 import { createPasteIndentExtension } from "./pasteIndent";
 import { errorLensExtension, lspDiagnosticsToLumen, setDiagnosticsEffect } from "./errorLens";
 import { createImagePreviewHost, type ImageEntry } from "./imagePreview";
@@ -22,6 +22,8 @@ export interface EditorCallbacks {
     onChange: (path: string, content: string) => void;
     getIndex: () => ProjectIndex;
     getRootPath: () => string | null;
+    readText: (path: string) => Promise<string>;
+    onNavigate: (path: string, line: number, character: number) => void;
 }
 
 const smoothCaret = ViewPlugin.fromClass(
@@ -189,6 +191,12 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
                     { autocomplete: createHtmlEmmetCompletionSource(() => path) },
                 ]),
                 createLspHoverExtension(() => path),
+                createLspDefinitionExtension({
+                    getActivePath: () => path,
+                    getIndex: cb.getIndex,
+                    readText: cb.readText,
+                    onNavigate: cb.onNavigate,
+                }),
                 errorLensExtension(() => path),
                 rectangularSelection(),
                 highlightActiveLine(),
@@ -255,6 +263,18 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
             const next = path ? states.get(path) : undefined;
             view.setState(next ?? empty);
             if (next) view.focus();
+        },
+        revealPosition(path, line, character) {
+            if (active !== path) return;
+            const doc = view.state.doc;
+            const lineNum = Math.max(1, Math.min(doc.lines, line + 1));
+            const docLine = doc.line(lineNum);
+            const pos = Math.min(docLine.to, docLine.from + Math.max(0, character));
+            view.dispatch({
+                selection: EditorSelection.cursor(pos),
+                effects: EditorView.scrollIntoView(pos, { y: "center" }),
+            });
+            view.focus();
         },
         rename(oldPath, newPath) {
             const img = images.get(oldPath);

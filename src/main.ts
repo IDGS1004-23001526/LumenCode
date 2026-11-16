@@ -48,6 +48,8 @@ const editor = createCodeMirrorEditor($("editor"), {
   },
   getIndex: () => indexer.index,
   getRootPath: () => store.getState().rootPath,
+  readText: (path) => fs.readText(path),
+  onNavigate: (path, line, character) => void uc.openFileAt(path, line, character),
 });
 
 // Casos de uso

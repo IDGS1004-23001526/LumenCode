@@ -88,6 +88,11 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
     }
   }
 
+  async function openFileAt(path: string, line: number, character: number) {
+    await openFile(path);
+    editor.revealPosition(path, line, character);
+  }
+
   async function closeTab(path: string) {
     const tab = st().tabs.find((t) => t.path === path);
     if (!tab) return;
@@ -221,6 +226,7 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
     refresh,
     toggleFolder,
     openFile,
+    openFileAt,
     closeTab,
     saveActive,
     createEntry,

@@ -23,7 +23,9 @@ export function registerShortcuts(store: AppStore, uc: UseCases) {
             e.key === "BrowserBack" ||
             e.key === "BrowserForward" ||
             (e.altKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) ||
-            (!e.defaultPrevented && BLOCKED_FUNCTION_KEYS.has(e.key) && !(e.key === "F3" && inEditor))
+            (!e.defaultPrevented &&
+                BLOCKED_FUNCTION_KEYS.has(e.key) &&
+                !((e.key === "F3" || e.key === "F12") && inEditor))
         ) {
             e.preventDefault();
             return;
