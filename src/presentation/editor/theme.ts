@@ -6,9 +6,22 @@ export const lumenTheme = EditorView.theme (
     {
         "&": { height: "100%", color: "var(--fg)", backgroundColor: "var(--bg)", fontSize: "var(--editor-font-size)" },
         "&.cm-focused": { outline: "none" },
-        ".cm-scroller": { fontFamily: "var(--editor-font)", lineHeight: "1.65" },
-        ".cm-content": { caretColor: "var(--accent)", padding: "0 0 40px" },
-        ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--accent)", borderLeftWidth: "2px" },
+        ".cm-scroller": { 
+            fontFamily: "var(--editor-font)", 
+            lineHeight: "1.65",
+            overflow: "auto",
+            overscrollBehavior: "contain",
+        },
+                ".cm-content": { caretColor: "transparent", padding: "0 0 40px" },
+        ".cm-cursorLayer": { animation: "none !important" },
+        ".cm-cursor, .cm-dropCursor": {
+            borderLeftColor: "var(--accent)",
+            borderLeftWidth: "2.2px",
+            borderRadius: "1px",
+            transformOrigin: "center center",
+            animation: "var(--cursor-animation, none) !important",
+            willChange: "transform, opacity",
+        },
         ".cm-gutters": { backgroundColor: "var(--bg)", color: "var(--fg-faint)", border: "none" },
         ".cm-lineNumbers .cm-gutterElement": { padding: "0 14px 0 4px", minWidth: "28px", textAlign: "left" },
         ".cm-activeLineGutter": { backgroundColor: "transparent", color: "var(--fg-muted)" },
@@ -26,9 +39,9 @@ export const lumenTheme = EditorView.theme (
 );
 
 export const lumenHighlight = HighlightStyle.define([
-    { tag: [t.keyword, t.controlKeyword, t.operatorKeyword, t.definitionKeyword, t.moduleKeyword, t.modifier, t.self],
-    color: "var(--syn-keyword)" },
-    { tag: [t.function(t.variableName), t.function(t.propertyName), t.className, t.typeName, t.namespace, t.macroName],
+    { tag: [t.keyword, t.controlKeyword, t.operatorKeyword, t.definitionKeyword, t.moduleKeyword, t.modifier, t.self, t.meta],
+        color: "var(--syn-keyword)" },
+    { tag: [t.function(t.variableName), t.function(t.propertyName), t.className, t.typeName, t.namespace, t.macroName, t.definition(t.typeName), t.standard(t.variableName)],
         color: "var(--syn-function)" },
     { tag: [t.string, t.special(t.string), t.regexp], color: "var(--syn-string)" },
     { tag: [t.number, t.bool, t.null, t.atom], color: "var(--syn-number)" },

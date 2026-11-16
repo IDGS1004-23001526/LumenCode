@@ -13,6 +13,7 @@ export type Action =
   | { type: "tab/activate"; path: string }
   | { type: "tab/close"; path: string }
   | { type: "tab/dirty"; path: string; dirty: boolean }
+  | { type: "entry/renamed"; oldPath: string; newPath: string; isDir: boolean }
   | { type: "panel/toggle" }
   | { type: "panel/show"; view: PanelView }
   | { type: "sidebar/toggle" }
@@ -74,6 +75,26 @@ export function reducer(s: AppState, a: Action): AppState {
       const tab = s.tabs.find((t) => t.path === a.path);
       if (!tab || tab.dirty === a.dirty) return s; // evita re-render en cada tecla
       return { ...s, tabs: s.tabs.map((t) => (t.path === a.path ? { ...t, dirty: a.dirty } : t)) };
+    }
+    case "entry/renamed": {
+      const remap = (p: string): string => {
+        if (p === a.oldPath) return a.newPath;
+        if (a.isDir && (p.startsWith(`${a.oldPath}/`) || p.startsWith(`${a.oldPath}\\`))) {
+          return a.newPath + p.slice(a.oldPath.length);
+        }
+        return p;
+      };
+      const expanded = new Set<string>();
+      for (const p of s.expanded) expanded.add(remap(p));
+      return {
+        ...s,
+        expanded,
+        activePath: s.activePath ? remap(s.activePath) : null,
+        tabs: s.tabs.map((t) => {
+          const nextPath = remap(t.path);
+          return nextPath === t.path ? t : { ...t, path: nextPath, name: fileNameOf(nextPath) };
+        }),
+      };
     }
 
     case "panel/toggle":

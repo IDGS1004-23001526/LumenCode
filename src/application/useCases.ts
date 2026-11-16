@@ -1,7 +1,8 @@
 import type { FileNode } from "../domain/types";
-import { hasFileExtension, isTextFile, isValidName, joinPath } from "../domain/path";
+import { hasFileExtension, imageMimeFor, isImageFile, isTextFile, isValidName, joinPath, parentDirOf } from "../domain/path";
 import type { AppStore } from "./reducer";
 import type { DialogPort, EditorPort, FileSystemPort, TerminalPort } from "./ports";
+import type { WorkspaceIndexer } from "./workspaceIndexer";
 
 interface Deps {
   store: AppStore;
@@ -9,11 +10,12 @@ interface Deps {
   dialogs: DialogPort;
   editor: EditorPort;
   terminal: TerminalPort;
+  indexer: WorkspaceIndexer;
 }
 
 export type UseCases = ReturnType<typeof createUseCases>;
 
-export function createUseCases({ store, fs, dialogs, editor, terminal }: Deps) {
+export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }: Deps) {
   const st = () => store.getState();
 
   async function loadChildren(path: string): Promise<boolean> {
@@ -37,6 +39,7 @@ export function createUseCases({ store, fs, dialogs, editor, terminal }: Deps) {
     // Recarga subcarpetas que estaban abiertas (padres antes que hijos).
     const open = [...st().expanded].filter((p) => p !== root).sort((a, b) => a.length - b.length);
     for (const p of open) await loadChildren(p);
+    void indexer.scanWorkspace(root);
   }
 
   async function openFolder() {
@@ -62,13 +65,32 @@ export function createUseCases({ store, fs, dialogs, editor, terminal }: Deps) {
       store.dispatch({ type: "tab/activate", path }); // ya abierto → foco
       return;
     }
+    if (isImageFile(path)) {
+      try {
+        const bytes = await fs.readBinary(path);
+        const blob = new Blob([new Uint8Array(bytes)], { type: imageMimeFor(path) });
+        const url = URL.createObjectURL(blob);
+        editor.openImage(path, url, bytes.byteLength);
+        store.dispatch({ type: "tab/open", path });
+      } catch (e) {
+        await dialogs.error(`No se pudo abrir la imagen.\n\n${String(e)}`);
+      }
+      return;
+    }
     if (!isTextFile(path)) return dialogs.error("Este tipo de archivo no se puede abrir en el editor.");
     try {
-      editor.open(path, await fs.readText(path));
+      const text = await fs.readText(path);
+      editor.open(path, text);
+      indexer.updateFile(path, text);
       store.dispatch({ type: "tab/open", path });
     } catch (e) {
       await dialogs.error(`No se pudo abrir el archivo.\n\n${String(e)}`);
     }
+  }
+
+  async function openFileAt(path: string, line: number, character: number) {
+    await openFile(path);
+    editor.revealPosition(path, line, character);
   }
 
   async function closeTab(path: string) {
@@ -134,6 +156,7 @@ export function createUseCases({ store, fs, dialogs, editor, terminal }: Deps) {
 
     try {
       await fs.remove(node.path);
+      indexer.removeFile(node.path);
     } catch (e) {
       return dialogs.error(`No se pudo eliminar el archivo \n\n${String(e)}`);
     }
@@ -147,15 +170,68 @@ export function createUseCases({ store, fs, dialogs, editor, terminal }: Deps) {
     await refresh();
   }
 
+  async function renameEntry(node: FileNode) {
+    if (node.path === st().rootPath) return;
+
+    const raw = await dialogs.prompt(
+      node.isDir ? "Nuevo nombre de la carpeta" : "Nuevo nombre del archivo",
+      { initialValue: node.name, confirmLabel: "Renombrar" },
+    );
+
+    if (!raw) return;
+    const nextName = raw.trim();
+    if (!nextName || nextName === node.name) return;
+
+    if (!isValidName(nextName)) {
+      return dialogs.error("El nombre contiene caracteres no válidos");
+    }
+
+    const parent = parentDirOf(node.path);
+    const newPath = joinPath(parent, nextName);
+
+    try {
+      if (newPath.toLowerCase() !== node.path.toLowerCase() && (await fs.exists(newPath))) {
+        return dialogs.error(`"${nextName}" ya existe en esta ubicación`);
+      }
+      await fs.rename(node.path, newPath);
+    } catch (e) {
+      return dialogs.error(`No se pudo renombrar.\n\n${String(e)}`);
+    }
+
+    const remap = (p: string): string => {
+      if (p === node.path) return newPath;
+      if (node.isDir && (p.startsWith(`${node.path}/`) || p.startsWith(`${node.path}\\`))) {
+        return newPath + p.slice(node.path.length);
+      }
+      return p;
+    };
+
+    for (const tab of st().tabs) {
+      const mapped = remap(tab.path);
+      if (mapped !== tab.path) {
+        editor.rename(tab.path, mapped);
+      }
+    }
+
+    if (!node.isDir) {
+      indexer.removeFile(node.path);
+    }
+
+    store.dispatch({ type: "entry/renamed", oldPath: node.path, newPath, isDir: node.isDir });
+    await refresh();
+  }
+
   return {
     openFolder,
     refresh,
     toggleFolder,
     openFile,
+    openFileAt,
     closeTab,
     saveActive,
     createEntry,
     deleteFile,
+    renameEntry,
     collapseAll: () => store.dispatch({ type: "tree/collapseAll" }),
   };
 }

@@ -9,14 +9,18 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
     "core:window:allow-set-title",
+    "core:window:allow-set-icon",
     "core:window:allow-destroy",
     "core:window:allow-start-dragging",
+    "core:window:allow-show",
     "dialog:default",
+    "fs:allow-read-file",
     "fs:allow-read-text-file",
     "fs:allow-write-text-file",
     "fs:allow-read-dir",
     "fs:allow-mkdir",
     "fs:allow-exists",
-    "fs:allow-remove"
+    "fs:allow-remove",
+    "fs:allow-rename"
   ]
 }
