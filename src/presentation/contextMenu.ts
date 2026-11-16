@@ -1,3 +1,4 @@
+import { animateContextMenuIn, animateContextMenuOut } from "./animate";
 import { h } from "./dom";
 
 export type MenuEntry = { label: string; shortcut?: string; disabled?: boolean; run: () => unknown } | "separator";
@@ -12,15 +13,22 @@ function onEsc(e: KeyboardEvent) {
     if (e.key === "Escape") hideContextMenu();
 }
 
-export function hideContextMenu() {
-    current?.remove();
+export function hideContextMenu(immediate = false) {
+    const closing = current;
     current = null;
     document.removeEventListener("pointerdown", onOutside);
     document.removeEventListener("keydown", onEsc);
+    if (!closing) return;
+    if (immediate) {
+        closing.remove();
+        return;
+    }
+    closing.style.pointerEvents = "none";
+    animateContextMenuOut(closing, () => closing.remove());
 }
 
 export function showContextMenu(x: number, y: number, entries: MenuEntry[]) {
-    hideContextMenu();
+    hideContextMenu(true);
 
     const menu = h("div", { class: "context-menu", role: "menu" });
 
@@ -45,6 +53,7 @@ export function showContextMenu(x: number, y: number, entries: MenuEntry[]) {
     menu.style.left = `${Math.min(x, innerWidth - width - 8)}px`;
     menu.style.top = `${Math.min(y, innerHeight - height - 8)}px`;
     current = menu;
+    animateContextMenuIn(menu);
 
     setTimeout (() => {
         document.addEventListener("pointerdown", onOutside);

@@ -262,6 +262,35 @@ async fn terminal_exec(
     .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err("URL no permitida".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", "", &url])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -270,7 +299,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .setup(|app| {
-            let window = tauri::WebviewWindowBuilder::new(
+            let builder = tauri::WebviewWindowBuilder::new(
                 app,
                 "main",
                 tauri::WebviewUrl::App("index.html".into()),
@@ -278,10 +307,29 @@ pub fn run() {
             .title("LumenCode")
             .inner_size(1100.0, 720.0)
             .min_inner_size(520.0, 360.0)
-            .decorations(false)
             .center()
-            .devtools(false)
-            .build()?;
+            .visible(false)
+            .background_color(tauri::window::Color(24, 26, 33, 255))
+            .devtools(false);
+
+            #[cfg(target_os = "macos")]
+            let builder = builder
+                .decorations(true)
+                .title_bar_style(tauri::TitleBarStyle::Overlay)
+                .hidden_title(true);
+
+            #[cfg(not(target_os = "macos"))]
+            let builder = builder.decorations(false);
+
+            let window = builder.build()?;
+
+            let fallback_win = window.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(2500));
+                if !fallback_win.is_visible().unwrap_or(true) {
+                    let _ = fallback_win.show();
+                }
+            });
 
             #[cfg(target_os = "windows")]
             {
@@ -339,7 +387,8 @@ pub fn run() {
             lsp::lsp_start,
             lsp::lsp_send,
             lsp::lsp_stop,
-            lsp::lsp_stop_all
+            lsp::lsp_stop_all,
+            open_external_url
         ])
         .build(tauri::generate_context!())
         .expect("error al construir la aplicación Lumen")

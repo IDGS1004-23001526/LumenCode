@@ -3,7 +3,8 @@ import type { AppState } from "../../domain/types";
 import { fileNameOf } from "../../domain/path";
 import type { AppStore } from "../../application/reducer";
 import { h } from "../dom";
-import appIconUrl from "../../../src-tauri/icons/32x32.png";
+
+const TITLEBAR_LOGO_SVG = `<svg width="16" height="16" viewBox="0 0 96 96"><rect x="10" y="10" width="76" height="76" rx="22" fill="var(--bg)" stroke="var(--border)" stroke-width="4"/><path d="M36 30 V62 H56" fill="none" stroke="var(--fg)" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/><circle cx="58" cy="35" r="6.5" fill="var(--accent)"/></svg>`;
 
 const WIN_ICONS = {
   min: `<svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 5h8" stroke="currentColor" stroke-width="1.2"/></svg>`,
@@ -13,14 +14,14 @@ const WIN_ICONS = {
 
 export function mountTitlebar(el: HTMLElement, store: AppStore) {
   const appWin = getCurrentWindow();
+  const isMac = /Mac/i.test(navigator.platform || navigator.userAgent);
+  if (isMac) el.classList.add("is-mac");
 
-  const iconEl = h("img", {
+  const iconEl = h("span", {
     class: "titlebar-icon",
-    src: appIconUrl,
-    alt: "LumenCode",
-    draggable: "false",
     "data-tauri-drag-region": "",
   });
+  iconEl.innerHTML = TITLEBAR_LOGO_SVG;
   const titleEl = h("span", { class: "titlebar-title", "data-tauri-drag-region": "" }, "LumenCode");
 
   const left = h(
@@ -50,7 +51,11 @@ export function mountTitlebar(el: HTMLElement, store: AppStore) {
     void appWin.toggleMaximize();
   });
 
-  el.replaceChildren(left, controls);
+  if (isMac) {
+    el.replaceChildren(left);
+  } else {
+    el.replaceChildren(left, controls);
+  }
 
   const updateTitle = (s: AppState) => {
     const folder = s.rootPath ? fileNameOf(s.rootPath) : null;

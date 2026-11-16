@@ -2,6 +2,7 @@ import "@fontsource-variable/inter";
 import "@fontsource-variable/jetbrains-mono";
 import "./styles.css";
 
+import { Image } from "@tauri-apps/api/image";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { DEFAULT_SETTINGS, type Settings } from "./domain/types";
@@ -17,10 +18,11 @@ import { localSettingsRepository } from "./infraestructure/localSettingsReposito
 import { findTheme } from "./infraestructure/themeRepository";
 import { findIconTheme } from "./infraestructure/iconThemeRepository";
 import { lspClient } from "./infraestructure/lspClient";
-import { setAnimationsEnabled } from "./presentation/animate";
+import { animateLayoutWithPanel, setAnimationsEnabled } from "./presentation/animate";
 
 import { createCodeMirrorEditor } from "./presentation/editor/codemirrorEditor";
-import { promptModal } from "./presentation/promptModal";
+import { confirmModal, promptModal } from "./presentation/promptModal";
+import { mountResizers } from "./presentation/resizer";
 import { registerShortcuts } from "./presentation/shortcuts";
 import { mountExplorer } from "./presentation/views/explorerView";
 import { mountTitlebar } from "./presentation/views/titlebarView";
@@ -38,7 +40,7 @@ const store = createStore(reducer, initialState({ ...DEFAULT_SETTINGS, ...settin
 
 // Adaptadores
 const fs = createTauriFileSystem();
-const dialogs: DialogPort = { ...createTauriDialogs(), prompt: promptModal };
+const dialogs: DialogPort = { ...createTauriDialogs(), prompt: promptModal, confirm: confirmModal };
 const terminal = new NativeTerminal(); // Aquí invoca PowerShell en Win, zsh en Mac o bash en Linux
 const indexer = new WorkspaceIndexer(fs);
 const editor = createCodeMirrorEditor($("editor"), {
@@ -60,12 +62,59 @@ mountTitlebar($("titlebar"), store);
 mountExplorer($("sidebar"), store, uc);
 mountTabBar($("tabbar"), store, uc);
 mountBottomPanel($("panel"), store, terminal);
+mountResizers($("sidebar"), $("panel"), () => editor.remeasure());
 mountSettingsModal(store);
 registerShortcuts(store, uc);
 
 // Efectos globales derivados del estado
 let appliedThemeVars: string[] = [];
 let appliedIconVars: string[] = [];
+let lastTaskbarThemeKey = "";
+
+async function updateTaskbarIcon(surface: string, border: string, fg: string, accent: string) {
+  const key = `${surface}|${border}|${fg}|${accent}`;
+  if (key === lastTaskbarThemeKey) return;
+  lastTaskbarThemeKey = key;
+
+  const size = 64;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  const s = size / 96;
+  ctx.scale(s, s);
+
+  ctx.beginPath();
+  ctx.roundRect(10, 10, 76, 76, 22);
+  ctx.fillStyle = surface;
+  ctx.fill();
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = border;
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(36, 30);
+  ctx.lineTo(36, 62);
+  ctx.lineTo(56, 62);
+  ctx.strokeStyle = fg;
+  ctx.lineWidth = 8;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.arc(58, 35, 6.5, 0, Math.PI * 2);
+  ctx.fillStyle = accent;
+  ctx.fill();
+
+  const rgba = new Uint8Array(ctx.getImageData(0, 0, size, size).data);
+  try {
+    const icon = await Image.new(rgba, size, size);
+    await getCurrentWindow().setIcon(icon);
+  } catch {}
+}
 
 function applySettings(s: Settings) {
   setAnimationsEnabled(s.animations ?? true);
@@ -103,6 +152,23 @@ function applySettings(s: Settings) {
     solid: "none",
   };
   root.setProperty("--cursor-animation", animMap[s.cursorBlinking] ?? "none");
+  try {
+    localStorage.setItem("lumen.startupTheme.v1", JSON.stringify({
+      bg: activeTheme.colors["--bg"] ?? "#F0F4F8",
+      surface: activeTheme.colors["--surface"] ?? "#E1E8ED",
+      border: activeTheme.colors["--border"] ?? "#D3DCE4",
+      fg: activeTheme.colors["--fg"] ?? "#3E4A5B",
+      accent: activeTheme.colors["--accent"] ?? "#5D9CEC",
+      dark: activeTheme.dark,
+      animations: s.animations ?? true,
+    }));
+  } catch {}
+  void updateTaskbarIcon(
+    activeTheme.colors["--surface"] ?? activeTheme.colors["--bg"] ?? "#E1E8ED",
+    activeTheme.colors["--border"] ?? "#D3DCE4",
+    activeTheme.colors["--fg"] ?? "#3E4A5B",
+    activeTheme.colors["--accent"] ?? "#5D9CEC",
+  );
   settingsRepo.save(s);
   editor.remeasure();
 }
@@ -111,7 +177,18 @@ store.subscribe((s, p) => {
   if (s.rootPath !== p.rootPath) void lspClient.stopAll();
   if (s.activePath !== p.activePath) editor.activate(s.activePath);
   if (s.settings !== p.settings) applySettings(s.settings);
-  if (s.sidebarVisible !== p.sidebarVisible) $("app").classList.toggle("no-sidebar", !s.sidebarVisible);
+  if (s.sidebarVisible !== p.sidebarVisible) {
+    const appEl = $("app");
+    const sidebarEl = $("sidebar");
+    const workbenchEl = document.querySelector(".workbench") as HTMLElement | null;
+    animateLayoutWithPanel(
+      sidebarEl,
+      workbenchEl,
+      s.sidebarVisible,
+      () => appEl.classList.toggle("no-sidebar", !s.sidebarVisible),
+      () => editor.remeasure(),
+    );
+  }
   if (s.panelVisible !== p.panelVisible) editor.remeasure();
   const active = s.tabs.find((t) => t.path === s.activePath);
   document.title = active ? `${active.dirty ? "● " : ""}${active.name} - Lumencode` : "LumenCode";
@@ -119,8 +196,25 @@ store.subscribe((s, p) => {
 
 applySettings(store.getState().settings);
 
-// Avisar al cerrar la ventana si hay cambios sin guardar y liberar subprocesos
 const appWin = getCurrentWindow();
+void appWin.show();
+
+const splash = document.getElementById("lumen-splash");
+if (splash) {
+  const hideSplash = () => {
+    if (!splash.isConnected) return;
+    if (!(store.getState().settings.animations ?? true)) {
+      splash.remove();
+      return;
+    }
+    splash.classList.add("hide");
+    setTimeout(() => splash.remove(), 300);
+  };
+  void Promise.race([
+    document.fonts.ready,
+    new Promise((r) => setTimeout(r, 400)),
+  ]).then(() => requestAnimationFrame(hideSplash));
+}
 void appWin.onCloseRequested(async (event) => {
   const dirty = store.getState().tabs.some((t) => t.dirty);
   if (dirty) {

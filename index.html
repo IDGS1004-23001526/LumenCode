@@ -4,8 +4,108 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>LumenCode</title>
+    <script>
+      (function () {
+        try {
+          var raw = localStorage.getItem("lumen.startupTheme.v1");
+          var t = raw ? JSON.parse(raw) : null;
+          var root = document.documentElement.style;
+          root.setProperty("--bg", (t && t.bg) || "#F0F4F8");
+          root.setProperty("--surface", (t && t.surface) || "#E1E8ED");
+          root.setProperty("--border", (t && t.border) || "#D3DCE4");
+          root.setProperty("--fg", (t && t.fg) || "#3E4A5B");
+          root.setProperty("--accent", (t && t.accent) || "#5D9CEC");
+          root.colorScheme = t && t.dark ? "dark" : "light";
+          if (t && t.animations === false) {
+            document.documentElement.setAttribute("data-no-anim", "true");
+          }
+        } catch (e) {}
+      })();
+    </script>
+    <style>
+      html, body {
+        margin: 0;
+        height: 100%;
+        background: var(--bg, #F0F4F8);
+        color: var(--fg, #3E4A5B);
+      }
+      #lumen-splash {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        display: grid;
+        place-items: center;
+        background: var(--bg, #F0F4F8);
+        transition: opacity 0.28s ease, transform 0.28s ease, filter 0.28s ease;
+      }
+      #lumen-splash.hide {
+        opacity: 0;
+        transform: scale(0.97);
+        filter: blur(6px);
+        pointer-events: none;
+      }
+      .splash-logo {
+        width: 88px;
+        height: 88px;
+        overflow: visible;
+      }
+      .splash-bg {
+        transform-origin: 48px 48px;
+        animation: lumen-spin-bg 3.2s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
+      }
+      .splash-l {
+        transform-origin: 45px 46px;
+        animation: lumen-pulse-l 1.6s ease-in-out infinite;
+      }
+      .splash-dot {
+        transform-origin: 58px 35px;
+        animation: lumen-pulse-dot 1.6s ease-in-out infinite;
+      }
+      html[data-no-anim="true"] .splash-bg,
+      html[data-no-anim="true"] .splash-l,
+      html[data-no-anim="true"] .splash-dot {
+        animation: none;
+      }
+      @keyframes lumen-spin-bg {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+      @keyframes lumen-pulse-l {
+        0%, 100% { transform: scale(1); opacity: 0.92; }
+        50% { transform: scale(1.04); opacity: 1; }
+      }
+      @keyframes lumen-pulse-dot {
+        0%, 100% { transform: scale(0.88) translateY(0); opacity: 0.85; }
+        50% { transform: scale(1.16) translateY(-2px); opacity: 1; }
+      }
+    </style>
   </head>
   <body>
+    <div id="lumen-splash" aria-hidden="true">
+      <svg class="splash-logo" viewBox="0 0 96 96">
+        <rect
+          class="splash-bg"
+          x="14"
+          y="14"
+          width="68"
+          height="68"
+          rx="18"
+          fill="var(--surface)"
+          stroke="var(--border)"
+          stroke-width="2"
+        />
+        <path
+          class="splash-l"
+          d="M36 30 V62 H56"
+          fill="none"
+          stroke="var(--fg)"
+          stroke-width="6.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+        <circle class="splash-dot" cx="58" cy="35" r="5.5" fill="var(--accent)" />
+      </svg>
+    </div>
     <header id="titlebar" class="titlebar" data-tauri-drag-region></header>
     <div id="app">
       <aside id="sidebar" class="sidebar"></aside>

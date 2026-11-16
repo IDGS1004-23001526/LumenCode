@@ -11,6 +11,7 @@ import { createHtmlEmmetCompletionSource, expandHtmlEmmetAtCursor } from "./html
 import { createLspCompletionSource, createLspDefinitionExtension, createLspHoverExtension } from "./lspExtension";
 import { createPasteIndentExtension } from "./pasteIndent";
 import { errorLensExtension, lspDiagnosticsToLumen, setDiagnosticsEffect } from "./errorLens";
+import { animateEditorContentIn, animateEditorContentOut } from "../animate";
 import { createImagePreviewHost, type ImageEntry } from "./imagePreview";
 
 import type { EditorPort } from "../../application/ports";
@@ -248,13 +249,22 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
             images.set(path, { path, url, byteSize, zoom: 0 });
         },
         activate(path) {
-            if (active && active !== path && states.has(active)) states.set(active, view.state); // Guarda la pestaña saliente
+            const prevActive = active;
+            if (active && active !== path && states.has(active)) states.set(active, view.state);
+            if (prevActive && prevActive !== path) {
+                const outgoing = images.has(prevActive)
+                    ? (parent.querySelector(".image-viewer") as HTMLElement | null)
+                    : view.dom;
+                if (outgoing && !outgoing.hidden) animateEditorContentOut(outgoing);
+            }
             active = path;
 
             const img = path ? images.get(path) : undefined;
             if (img) {
                 view.dom.hidden = true;
                 imageViewer.show(img);
+                const viewerEl = parent.querySelector(".image-viewer") as HTMLElement | null;
+                if (viewerEl && prevActive !== path) animateEditorContentIn(viewerEl);
                 return;
             }
 
@@ -262,6 +272,7 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
             view.dom.hidden = false;
             const next = path ? states.get(path) : undefined;
             view.setState(next ?? empty);
+            if (prevActive !== path) animateEditorContentIn(view.dom);
             if (next) view.focus();
         },
         revealPosition(path, line, character) {

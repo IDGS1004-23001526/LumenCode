@@ -1,6 +1,7 @@
 import type { AppState, PanelView } from "../../domain/types";
 import type { AppStore } from "../../application/reducer";
 import type { TerminalPort } from "../../application/ports";
+import { animateCaelestiaIn, animateLayoutWithPanel } from "../animate";
 import { cx, h } from "../dom";
 
 const VIEWS: { id: PanelView; label: string } [] = [
@@ -216,17 +217,44 @@ export function mountBottomPanel(el: HTMLElement, store: AppStore, terminal: Ter
 
     el.append(header, body);
 
-    function render(s: AppState) {
-        el.hidden = !s.panelVisible;
+    function syncTabs(s: AppState) {
         for (const { id, b } of buttons) b.classList.toggle("active", id === s.panelView);
         for (const id of Object.keys(views) as PanelView[]) views[id].hidden = id !== s.panelView;
     }
 
+    function render(s: AppState) {
+        el.hidden = !s.panelVisible;
+        syncTabs(s);
+    }
+
     render(store.getState());
     store.subscribe((s, p) => {
-        if (s.panelVisible !== p.panelVisible || s.panelView !== p.panelView) {
-            render(s);
-            if (s.panelVisible && s.panelView === "terminal") termView.focus();
+        if (s.panelVisible !== p.panelVisible) {
+            const editorEl = document.getElementById("editor");
+            if (s.panelVisible) {
+                syncTabs(s);
+                animateLayoutWithPanel(
+                    el,
+                    editorEl,
+                    true,
+                    () => { el.hidden = false; },
+                    () => { if (s.panelView === "terminal") termView.focus(); },
+                );
+            } else {
+                animateLayoutWithPanel(
+                    el,
+                    editorEl,
+                    false,
+                    () => {},
+                    () => { if (!store.getState().panelVisible) el.hidden = true; },
+                );
+            }
+        } else if (s.panelView !== p.panelView) {
+            syncTabs(s);
+            if (s.panelVisible) {
+                animateCaelestiaIn(views[s.panelView]);
+                if (s.panelView === "terminal") termView.focus();
+            }
         }
 
         if (s.rootPath !== p.rootPath) termView.refreshPrompt();

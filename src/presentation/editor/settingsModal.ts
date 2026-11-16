@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { open as pickFile } from "@tauri-apps/plugin-dialog";
 import { readTextFile } from "@tauri-apps/plugin-fs";
 import type { AppState, CursorBlinking, ExtensionManifest, IconThemeManifest, ThemeManifest } from "../../domain/types";
@@ -24,15 +25,16 @@ import {
 } from "../../infraestructure/extensionRepository";
 import { cx, h } from "../dom";
 import { iconForFile, iconForFolder } from "../icons";
-import { animateFadeSlide, animateModalOpen } from "../animate";
+import { animateFadeSlide, closePrettyModal, openPrettyModal } from "../animate";
 
-type SectionId = "editor" | "appearance" | "extensions" | "keybindings";
+type SectionId = "editor" | "appearance" | "extensions" | "keybindings" | "credits";
 
 const SECTIONS: { id: SectionId; label: string; desc: string }[] = [
   { id: "editor", label: "Text Editor", desc: "Tipografía, cursor y comportamiento" },
   { id: "appearance", label: "Appearance", desc: "Paletas de color de la interfaz" },
   { id: "extensions", label: "Extensions", desc: "Temas de la comunidad y utilidades" },
   { id: "keybindings", label: "Keybindings", desc: "Atajos de teclado globales" },
+  { id: "credits", label: "Créditos", desc: "Autoría y agradecimientos" },
 ];
 
 const FONTS = [
@@ -652,6 +654,66 @@ export function mountSettingsModal(store: AppStore) {
       );
     }
 
+    // CREDITOS
+    if (activeSection === "credits" || (q && matches("creditos autor github ogeidev gracias"))) {
+      const logoBadge = h("div", { class: "credits-logo" });
+      logoBadge.innerHTML = `<svg width="36" height="36" viewBox="0 0 96 96"><rect x="10" y="10" width="76" height="76" rx="20" fill="var(--bg)" stroke="var(--border)" stroke-width="2.5"/><path d="M36 30 V62 H56" fill="none" stroke="var(--fg)" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/><circle cx="58" cy="35" r="5.8" fill="var(--accent)"/></svg>`;
+
+      const ghIcon = h("span", { class: "credits-gh-icon" });
+      ghIcon.innerHTML = `<svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>`;
+
+      const githubBtn = h(
+        "button",
+        {
+          class: "credits-gh-btn",
+          onclick: () => void invoke("open_external_url", { url: "https://github.com/IDGS1004-23001526" }),
+        },
+        ghIcon,
+        h("span", {}, "Perfil de GitHub · @Ogeidev"),
+        h("span", { class: "credits-arrow" }, "↗"),
+      );
+
+      items.push(
+        h(
+          "div",
+          { class: "credits-hero" },
+          h(
+            "div",
+            { class: "credits-head" },
+            logoBadge,
+            h(
+              "div",
+              { class: "credits-brand" },
+              h(
+                "div",
+                { class: "credits-title-row" },
+                h("span", { class: "credits-name" }, "LumenCode"),
+                h("span", { class: "credits-pill" }, "v0.2.1"),
+              ),
+              h(
+                "div",
+                { class: "credits-owner" },
+                "Creado por ",
+                h("strong", { class: "credits-handle" }, "@Ogeidev"),
+                " · Propietario y autor legítimo",
+              ),
+            ),
+          ),
+          h("div", { class: "credits-actions" }, githubBtn),
+        ),
+        h(
+          "div",
+          { class: "credits-thanks" },
+          h("div", { class: "credits-thanks-title" }, "Gracias por programar con LumenCode"),
+          h(
+            "p",
+            { class: "credits-thanks-body" },
+            "Muchas gracias de corazón por darle una oportunidad a este editor y usarlo en tus proyectos. Cada detalle fue pensado con cariño y dedicación para ofrecerte un espacio rápido, limpio y cómodo donde construir tus ideas.",
+          ),
+        ),
+      );
+    }
+
     if (items.length === 0) {
       items.push(h("div", { class: "placeholder" }, "No se encontraron ajustes que coincidan con tu búsqueda."));
     }
@@ -665,6 +727,11 @@ export function mountSettingsModal(store: AppStore) {
     renderBody(store.getState());
   });
 
+  dlg.addEventListener("cancel", (e) => {
+    e.preventDefault();
+    close();
+  });
+
   dlg.addEventListener("close", () => {
     if (store.getState().settingsOpen) close();
   });
@@ -675,11 +742,10 @@ export function mountSettingsModal(store: AppStore) {
     if (s.settingsOpen && !dlg.open) {
       renderNav();
       renderBody(s);
-      dlg.showModal();
-      animateModalOpen(dlg);
+      openPrettyModal(dlg);
       searchInput.focus();
     } else if (!s.settingsOpen && dlg.open) {
-      dlg.close();
+      closePrettyModal(dlg);
     }
   });
 }

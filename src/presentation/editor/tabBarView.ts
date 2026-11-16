@@ -1,6 +1,7 @@
 import type { AppState } from "../../domain/types";
 import type { AppStore } from "../../application/reducer";
 import type { UseCases } from "../../application/useCases";
+import { animateTabIn, animateTabOut, captureTabsFlip, playTabsFlip } from "../animate";
 import { cx, h, iconButton } from "../dom";
 import { ICONS } from "../icons";
 
@@ -21,6 +22,7 @@ export function mountTabBar(el: HTMLElement, store: AppStore, uc: UseCases) {
                         class: cx("tab", active && "active"),
                         role: "tab",
                         "aria-selected": String(active),
+                        "data-flip-id": t.path,
                         title: t.path,
                         onclick: () => store.dispatch({ type: "tab/activate", path: t.path }),
                         onauxclick: (e: MouseEvent) => { if (e.button === 1) void uc.closeTab(t.path) },
@@ -43,6 +45,26 @@ export function mountTabBar(el: HTMLElement, store: AppStore, uc: UseCases) {
 
     render(store.getState());
     store.subscribe((s, p) => {
-        if (s.tabs !== p.tabs || s.activePath !== p.activePath || s.panelVisible !== p.panelVisible) render(s);
+        if (s.tabs !== p.tabs) {
+            const prevPaths = new Set(p.tabs.map((t) => t.path));
+            const nextPaths = new Set(s.tabs.map((t) => t.path));
+            const prevChildren = Array.from(list.children) as HTMLElement[];
+            const stayingPrev = prevChildren.filter((node) => nextPaths.has(node.dataset.flipId ?? ""));
+            const removed = prevChildren.filter((node) => !nextPaths.has(node.dataset.flipId ?? ""));
+
+            for (const node of removed) animateTabOut(node);
+            const flipState = captureTabsFlip(stayingPrev);
+
+            render(s);
+
+            const nextChildren = Array.from(list.children) as HTMLElement[];
+            const stayingNext = nextChildren.filter((node) => prevPaths.has(node.dataset.flipId ?? ""));
+            const added = nextChildren.filter((node) => !prevPaths.has(node.dataset.flipId ?? ""));
+
+            playTabsFlip(flipState, stayingNext);
+            for (const node of added) animateTabIn(node);
+            return;
+        }
+        if (s.activePath !== p.activePath || s.panelVisible !== p.panelVisible) render(s);
     });
 }
