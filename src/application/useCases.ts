@@ -344,19 +344,26 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
         "Stage All y Commit",
       );
       if (!ok) return false;
-      await gitClient.stage(root, []);
     }
 
     try {
-      await gitClient.commit(root, cleanMsg, amend);
-      if (pushAfter) {
-        if (g.upstream) {
-          await gitClient.remoteOp(root, "push");
-        } else {
-          await gitClient.remoteOp(root, "publish", g.branch);
-        }
-      }
-      await refreshGit();
+      await dialogs.withBusy(
+        pushAfter ? "Subiendo cambios a Git..." : "Confirmando commit...",
+        async () => {
+          if (!hasStaged && !amend) {
+            await gitClient.stage(root, []);
+          }
+          await gitClient.commit(root, cleanMsg, amend);
+          if (pushAfter) {
+            if (g.upstream) {
+              await gitClient.remoteOp(root, "push");
+            } else {
+              await gitClient.remoteOp(root, "publish", g.branch);
+            }
+          }
+          await refreshGit();
+        },
+      );
       return true;
     } catch (e) {
       await dialogs.error(`No se pudo completar el commit.\n\n${String(e)}`);
@@ -387,9 +394,21 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
     const root = repoRoot();
     const g = st().git;
     if (!root || !g) return;
+    const labels: Record<string, string> = {
+      fetch: "Obteniendo cambios remotos (Fetch)...",
+      pull: "Descargando cambios (Pull)...",
+      "pull-rebase": "Descargando cambios (Pull Rebase)...",
+      push: "Subiendo cambios a Git (Push)...",
+      publish: "Publicando rama en Git...",
+      sync: "Sincronizando cambios con Git...",
+      "abort-merge": "Abortando merge...",
+      "abort-rebase": "Abortando rebase...",
+    };
     try {
-      await gitClient.remoteOp(root, op, g.branch);
-      await refresh();
+      await dialogs.withBusy(labels[op] ?? "Ejecutando operación Git...", async () => {
+        await gitClient.remoteOp(root, op, g.branch);
+        await refresh();
+      });
     } catch (e) {
       await dialogs.error(`Error en operación Git (${op}).\n\n${String(e)}`);
       await refreshGit();

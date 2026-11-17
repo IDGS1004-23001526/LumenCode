@@ -21,6 +21,7 @@ import { lspClient } from "./infraestructure/lspClient";
 import { animateLayoutWithPanel, setAnimationsEnabled } from "./presentation/animate";
 
 import { createCodeMirrorEditor } from "./presentation/editor/codemirrorEditor";
+import { withBusyLoader } from "./presentation/busyLoader";
 import { confirmModal, promptModal } from "./presentation/promptModal";
 import { mountResizers } from "./presentation/resizer";
 import { registerShortcuts } from "./presentation/shortcuts";
@@ -43,7 +44,12 @@ const store = createStore(reducer, initialState({ ...DEFAULT_SETTINGS, ...settin
 
 // Adaptadores
 const fs = createTauriFileSystem();
-const dialogs: DialogPort = { ...createTauriDialogs(), prompt: promptModal, confirm: confirmModal };
+const dialogs: DialogPort = {
+  ...createTauriDialogs(),
+  prompt: promptModal,
+  confirm: confirmModal,
+  withBusy: withBusyLoader,
+};
 const terminal = new NativeTerminal(); // Aquí invoca PowerShell en Win, zsh en Mac o bash en Linux
 const indexer = new WorkspaceIndexer(fs);
 const editor = createCodeMirrorEditor($("editor"), {

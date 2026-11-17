@@ -17,6 +17,7 @@ export interface DialogPort {
   confirm(message: string, okLabel?: string): Promise<boolean>;
   error(message: string): Promise<void>;
   prompt(label: string, options?: { initialValue?: string; confirmLabel?: string }): Promise<string | null>;
+  withBusy<T>(label: string, task: () => Promise<T>): Promise<T>;
 }
 
 export interface EditorPort {
