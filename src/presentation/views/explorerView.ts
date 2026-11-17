@@ -1,7 +1,9 @@
+import type { GitFileStatus } from "../../domain/git";
 import type { AppState, FileNode } from "../../domain/types";
 import { fileNameOf, parentDirOf } from "../../domain/path";
 import type { AppStore } from "../../application/reducer";
 import type { UseCases } from "../../application/useCases";
+import { toRelativeRepoPath } from "../../infraestructure/gitClient";
 import { animateCaelestiaItems, animateCaelestiaItemsOut, captureTabsFlip, playTabsFlip } from "../animate";
 import { cx, h, iconButton } from "../dom";
 import { ICONS, iconForFile, iconForFolder } from "../icons";
@@ -63,7 +65,31 @@ export function mountExplorer(el: HTMLElement, store: AppStore, uc: UseCases) {
         treeEl,
     );
 
-    function renderNode(node: FileNode, depth: number, s: AppState, isRoot = false, parentPath?: string): HTMLElement[] {
+    function buildGitMaps(s: AppState) {
+        const fileMap = new Map<string, GitFileStatus>();
+        const dirtyDirs = new Set<string>();
+        const g = s.git;
+        if (g?.is_repo && g.root) {
+            for (const e of g.entries) {
+                const rel = e.path.replace(/\\/g, "/");
+                fileMap.set(rel.toLowerCase(), e);
+                const parts = rel.split("/");
+                for (let i = 1; i < parts.length; i++) {
+                    dirtyDirs.add(parts.slice(0, i).join("/").toLowerCase());
+                }
+            }
+        }
+        return { repoRoot: g?.root ?? null, fileMap, dirtyDirs };
+    }
+
+    function renderNode(
+        node: FileNode,
+        depth: number,
+        s: AppState,
+        gitMaps: ReturnType<typeof buildGitMaps>,
+        isRoot = false,
+        parentPath?: string,
+    ): HTMLElement[] {
         const open = s.expanded.has(node.path);
         const chevron = h("span", { class: cx("chevron", open && "open") });
 
@@ -72,6 +98,10 @@ export function mountExplorer(el: HTMLElement, store: AppStore, uc: UseCases) {
         const iconTheme = findIconTheme(s.settings.iconTheme);
         const icon = h("span", { class: "node-icon" });
         icon.innerHTML = node.isDir ? iconForFolder(node.name, open, iconTheme) : iconForFile(node.name, iconTheme);
+
+        const rel = gitMaps.repoRoot ? toRelativeRepoPath(gitMaps.repoRoot, node.path)?.toLowerCase() ?? null : null;
+        const gitEntry = !node.isDir && rel ? gitMaps.fileMap.get(rel) : undefined;
+        const dirDirty = node.isDir && !isRoot && rel ? gitMaps.dirtyDirs.has(rel) : false;
 
         const row = h(
             "div",
@@ -95,12 +125,16 @@ export function mountExplorer(el: HTMLElement, store: AppStore, uc: UseCases) {
                     openMenuAt(e.clientX, e.clientY, targetDir, node, isRoot);
                 },
             },
-            chevron, icon, h("span", { class: "label" }, node.name),
+            chevron,
+            icon,
+            h("span", { class: cx("label", gitEntry && `git-label-${gitEntry.status}`) }, node.name),
+            gitEntry ? h("span", { class: `git-badge git-${gitEntry.status}` }, gitEntry.status) : null,
+            dirDirty ? h("span", { class: "git-folder-dot" }, "●") : null,
         );
 
         const rows = [row];
         if (node.isDir && open && node.children) {
-            for (const child of node.children) rows.push(...renderNode(child, depth + 1, s, false, node.path));
+            for (const child of node.children) rows.push(...renderNode(child, depth + 1, s, gitMaps, false, node.path));
         }
         return rows;
     }
@@ -116,8 +150,9 @@ export function mountExplorer(el: HTMLElement, store: AppStore, uc: UseCases) {
             return;
         }
 
+        const gitMaps = buildGitMaps(s);
         const root: FileNode = { path: s.rootPath, name: fileNameOf(s.rootPath), isDir: true, children: s.tree };
-        treeEl.replaceChildren(...renderNode(root, 0, s, true));
+        treeEl.replaceChildren(...renderNode(root, 0, s, gitMaps, true));
     }
 
     render(store.getState());
@@ -127,7 +162,8 @@ export function mountExplorer(el: HTMLElement, store: AppStore, uc: UseCases) {
             s.expanded !== p.expanded ||
             s.rootPath !== p.rootPath ||
             s.activePath !== p.activePath ||
-            s.settings.iconTheme !== p.settings.iconTheme
+            s.settings.iconTheme !== p.settings.iconTheme ||
+            s.git !== p.git
         ) {
             const expandedChanged = s.expanded !== p.expanded && s.rootPath === p.rootPath;
             const collapsedPaths = expandedChanged

@@ -5,6 +5,7 @@ import { bracketMatching, foldGutter, foldKeymap, indentOnInput, indentUnit, syn
 import { acceptCompletion, autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from "@codemirror/autocomplete";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
 
+import type { DiffPayload } from "../../domain/git";
 import type { ProjectIndex } from "../../domain/symbolIndex";
 import { lspClient } from "../../infraestructure/lspClient";
 import { createHtmlEmmetCompletionSource, expandHtmlEmmetAtCursor } from "./htmlEmmetCompletion";
@@ -12,6 +13,9 @@ import { createLspCompletionSource, createLspDefinitionExtension, createLspHover
 import { createPasteIndentExtension } from "./pasteIndent";
 import { errorLensExtension, lspDiagnosticsToLumen, setDiagnosticsEffect } from "./errorLens";
 import { animateEditorContentIn, animateEditorContentOut } from "../animate";
+import { createDiffPreviewHost } from "./diffViewer";
+import { createGitConflictExtension } from "./gitConflicts";
+import { createGitGutterExtension } from "./gitGutter";
 import { createImagePreviewHost, type ImageEntry } from "./imagePreview";
 
 import type { EditorPort } from "../../application/ports";
@@ -25,6 +29,11 @@ export interface EditorCallbacks {
     getRootPath: () => string | null;
     readText: (path: string) => Promise<string>;
     onNavigate: (path: string, line: number, character: number) => void;
+    onGitMutated: () => void;
+    onOpenDiff: (diff: DiffPayload) => void;
+    onDiffMutated: (repoRoot: string, relPath: string) => Promise<void>;
+    confirmAction: (message: string, okLabel?: string) => Promise<boolean>;
+    onError: (message: string) => Promise<void>;
 }
 
 const smoothCaret = ViewPlugin.fromClass(
@@ -167,6 +176,12 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
             doc,
             extensions: [
                 lineNumbers(),
+                createGitGutterExtension({
+                    getPath: () => path,
+                    getRepoRoot: cb.getRootPath,
+                    onGitMutated: cb.onGitMutated,
+                }),
+                createGitConflictExtension(() => path, cb.onOpenDiff),
                 highlightActiveLineGutter(),
                 foldGutter({ openText: "⌄", closedText: "›" }),
                 history(),
@@ -224,6 +239,12 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
     const view = new EditorView({ parent, state: empty });
     const images = new Map<string, ImageEntry>();
     const imageViewer = createImagePreviewHost(parent);
+    const diffs = new Map<string, DiffPayload>();
+    const diffViewer = createDiffPreviewHost(parent, {
+        onMutated: cb.onDiffMutated,
+        confirmRevert: cb.confirmAction,
+        onError: cb.onError,
+    });
 
     lspClient.onDiagnostics((diagPath, lspDiags) => {
         if (diagPath === active) {
@@ -248,19 +269,25 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
             if (prev) URL.revokeObjectURL(prev.url);
             images.set(path, { path, url, byteSize, zoom: 0 });
         },
+        openDiff(diff) {
+            diffs.set(diff.id, diff);
+        },
         activate(path) {
             const prevActive = active;
             if (active && active !== path && states.has(active)) states.set(active, view.state);
             if (prevActive && prevActive !== path) {
                 const outgoing = images.has(prevActive)
                     ? (parent.querySelector(".image-viewer") as HTMLElement | null)
-                    : view.dom;
+                    : diffs.has(prevActive)
+                        ? (parent.querySelector(".diff-viewer") as HTMLElement | null)
+                        : view.dom;
                 if (outgoing && !outgoing.hidden) animateEditorContentOut(outgoing);
             }
             active = path;
 
             const img = path ? images.get(path) : undefined;
             if (img) {
+                diffViewer.hide();
                 view.dom.hidden = true;
                 imageViewer.show(img);
                 const viewerEl = parent.querySelector(".image-viewer") as HTMLElement | null;
@@ -268,7 +295,18 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
                 return;
             }
 
+            const diff = path ? diffs.get(path) : undefined;
+            if (diff) {
+                imageViewer.hide();
+                view.dom.hidden = true;
+                diffViewer.show(diff);
+                const diffEl = parent.querySelector(".diff-viewer") as HTMLElement | null;
+                if (diffEl && prevActive !== path) animateEditorContentIn(diffEl);
+                return;
+            }
+
             imageViewer.hide();
+            diffViewer.hide();
             view.dom.hidden = false;
             const next = path ? states.get(path) : undefined;
             view.setState(next ?? empty);
@@ -330,6 +368,15 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
                 }
                 return;
             }
+            if (diffs.has(path)) {
+                diffs.delete(path);
+                if (active === path) {
+                    active = null;
+                    diffViewer.hide();
+                    view.dom.hidden = false;
+                }
+                return;
+            }
             states.delete(path);
             if (active === path) active = null;
             lspClient.closeDocument(path);
@@ -337,6 +384,17 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
         getText(path) {
             const state = path === active ? view.state : states.get(path);
             return state?.doc.toString() ?? "";
+        },
+        setText(path, content) {
+            if (path === active) {
+                view.dispatch({
+                    changes: { from: 0, to: view.state.doc.length, insert: content },
+                });
+                return;
+            }
+            if (states.has(path)) {
+                states.set(path, build(path, content));
+            }
         },
         focus: () => view.focus(),
         remeasure: () => view.requestMeasure(),
