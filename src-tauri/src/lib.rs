@@ -1,3 +1,4 @@
+mod git;
 mod lsp;
 
 use serde::Serialize;
@@ -388,6 +389,26 @@ pub fn run() {
             lsp::lsp_send,
             lsp::lsp_stop,
             lsp::lsp_stop_all,
+            git::git_status,
+            git::git_init,
+            git::git_stage,
+            git::git_unstage,
+            git::git_discard,
+            git::git_commit,
+            git::git_undo_last_commit,
+            git::git_branches,
+            git::git_checkout,
+            git::git_rename_branch,
+            git::git_delete_branch,
+            git::git_remote_op,
+            git::git_show_file,
+            git::git_apply_patch,
+            git::git_stash_list,
+            git::git_stash_push,
+            git::git_stash_op,
+            git::git_log,
+            git::git_commit_files,
+            git::git_add_gitignore,
             open_external_url
         ])
         .build(tauri::generate_context!())

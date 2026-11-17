@@ -1,3 +1,5 @@
+import type { GitStatus } from "./git";
+
 export interface FileNode {
     path: string;
     name: string;
@@ -13,6 +15,7 @@ export interface Tab {
     dirty: boolean;
 }
 
+export type SidebarView = "explorer" | "git";
 export type PanelView = "problems" | "output" | "debug" | "terminal";
 export type CursorBlinking = "blink" | "smooth" | "phase" | "expand" | "solid"; 
 
@@ -77,10 +80,12 @@ export interface AppState {
     tabs: Tab[];
     activePath: string | null;
     sidebarVisible: boolean;
+    sidebarView: SidebarView;
     panelVisible: boolean;
     panelView: PanelView;
     settingsOpen: boolean;
     settings: Settings;
+    git: GitStatus | null;
 }
 
 export const DEFAULT_SETTINGS: Settings = {

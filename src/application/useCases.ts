@@ -1,5 +1,7 @@
+import type { DiffPayload, GitCommitFile, GitFileStatus } from "../domain/git";
 import type { FileNode } from "../domain/types";
 import { hasFileExtension, imageMimeFor, isImageFile, isTextFile, isValidName, joinPath, parentDirOf } from "../domain/path";
+import { gitClient } from "../infraestructure/gitClient";
 import type { AppStore } from "./reducer";
 import type { DialogPort, EditorPort, FileSystemPort, TerminalPort } from "./ports";
 import type { WorkspaceIndexer } from "./workspaceIndexer";
@@ -40,6 +42,7 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
     const open = [...st().expanded].filter((p) => p !== root).sort((a, b) => a.length - b.length);
     for (const p of open) await loadChildren(p);
     void indexer.scanWorkspace(root);
+    void refreshGit();
   }
 
   async function openFolder() {
@@ -107,6 +110,7 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
     try {
       await fs.writeText(path, editor.getText(path));
       store.dispatch({ type: "tab/dirty", path, dirty: false });
+      scheduleGitRefresh();
     } catch (e) {
       await dialogs.error(`No se pudo guardar.\n\n${String(e)}`);
     }
@@ -221,6 +225,290 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
     await refresh();
   }
 
+  async function refreshGit() {
+    const root = st().rootPath;
+    if (!root) {
+      store.dispatch({ type: "git/status", status: null });
+      return;
+    }
+    try {
+      const status = await gitClient.status(root);
+      if (st().rootPath === root) {
+        store.dispatch({ type: "git/status", status });
+      }
+    } catch {
+      // Ignorar errores transitorios en background
+    }
+  }
+
+  function scheduleGitRefresh() {
+    const root = st().rootPath;
+    if (!root) return;
+    gitClient.scheduleRefresh(root, (status) => {
+      if (st().rootPath === root) {
+        store.dispatch({ type: "git/status", status });
+      }
+    });
+  }
+
+  function repoRoot(): string | null {
+    const g = st().git;
+    if (g?.is_repo && g.root) return g.root;
+    return st().rootPath;
+  }
+
+  async function gitInit() {
+    const root = st().rootPath;
+    if (!root) return;
+    try {
+      await gitClient.init(root);
+      await refreshGit();
+    } catch (e) {
+      await dialogs.error(`No se pudo inicializar el repositorio.\n\n${String(e)}`);
+    }
+  }
+
+  async function gitStage(paths: string[]) {
+    const root = repoRoot();
+    if (!root) return;
+    try {
+      await gitClient.stage(root, paths);
+      await refreshGit();
+    } catch (e) {
+      await dialogs.error(`No se pudo hacer stage.\n\n${String(e)}`);
+    }
+  }
+
+  async function gitUnstage(paths: string[]) {
+    const root = repoRoot();
+    if (!root) return;
+    try {
+      await gitClient.unstage(root, paths);
+      await refreshGit();
+    } catch (e) {
+      await dialogs.error(`No se pudo hacer unstage.\n\n${String(e)}`);
+    }
+  }
+
+  async function gitDiscard(entry: GitFileStatus) {
+    const root = repoRoot();
+    if (!root) return;
+    const isUntracked = entry.status === "U";
+    const ok = await dialogs.confirm(
+      isUntracked
+        ? `¿Eliminar el archivo sin seguimiento "${entry.path}"? Esta acción no se puede deshacer.`
+        : `¿Descartar los cambios en "${entry.path}"?`,
+      isUntracked ? "Eliminar" : "Descartar",
+    );
+    if (!ok) return;
+
+    try {
+      await gitClient.discard(root, [entry.path], isUntracked);
+      const fullPath = joinPath(root, entry.path);
+      if (st().tabs.some((t) => t.path === fullPath)) {
+        if (isUntracked) {
+          editor.close(fullPath);
+          store.dispatch({ type: "tab/close", path: fullPath });
+        } else {
+          const text = await fs.readText(fullPath).catch(() => "");
+          editor.setText(fullPath, text);
+          store.dispatch({ type: "tab/dirty", path: fullPath, dirty: false });
+        }
+      }
+      await refresh();
+    } catch (e) {
+      await dialogs.error(`No se pudieron descartar los cambios.\n\n${String(e)}`);
+    }
+  }
+
+  async function gitCommit(message: string, amend = false, pushAfter = false): Promise<boolean> {
+    const root = repoRoot();
+    const g = st().git;
+    if (!root || !g) return false;
+
+    const cleanMsg = message.trim();
+    if (!cleanMsg) {
+      await dialogs.error("Escribe un mensaje para el commit.");
+      return false;
+    }
+
+    const hasStaged = g.entries.some((e) => e.staged);
+    const hasUnstaged = g.entries.some((e) => e.unstaged);
+    if (!hasStaged && !amend) {
+      if (!hasUnstaged) {
+        await dialogs.error("No hay cambios para confirmar.");
+        return false;
+      }
+      const ok = await dialogs.confirm(
+        "No hay cambios en stage. ¿Quieres hacer Stage All y confirmar el commit?",
+        "Stage All y Commit",
+      );
+      if (!ok) return false;
+    }
+
+    try {
+      await dialogs.withBusy(
+        pushAfter ? "Subiendo cambios a Git..." : "Confirmando commit...",
+        async () => {
+          if (!hasStaged && !amend) {
+            await gitClient.stage(root, []);
+          }
+          await gitClient.commit(root, cleanMsg, amend);
+          if (pushAfter) {
+            if (g.upstream) {
+              await gitClient.remoteOp(root, "push");
+            } else {
+              await gitClient.remoteOp(root, "publish", g.branch);
+            }
+          }
+          await refreshGit();
+        },
+      );
+      return true;
+    } catch (e) {
+      await dialogs.error(`No se pudo completar el commit.\n\n${String(e)}`);
+      await refreshGit();
+      return false;
+    }
+  }
+
+  async function gitUndoLastCommit() {
+    const root = repoRoot();
+    if (!root) return;
+    const ok = await dialogs.confirm(
+      "¿Deshacer el último commit (git reset --soft HEAD~1)? Los cambios volverán a Staged Changes.",
+      "Deshacer commit",
+    );
+    if (!ok) return;
+    try {
+      await gitClient.undoLastCommit(root);
+      await refreshGit();
+    } catch (e) {
+      await dialogs.error(`No se pudo deshacer el último commit.\n\n${String(e)}`);
+    }
+  }
+
+  async function gitRemoteOp(
+    op: "fetch" | "pull" | "pull-rebase" | "push" | "publish" | "sync" | "abort-merge" | "abort-rebase",
+  ) {
+    const root = repoRoot();
+    const g = st().git;
+    if (!root || !g) return;
+    const labels: Record<string, string> = {
+      fetch: "Obteniendo cambios remotos (Fetch)...",
+      pull: "Descargando cambios (Pull)...",
+      "pull-rebase": "Descargando cambios (Pull Rebase)...",
+      push: "Subiendo cambios a Git (Push)...",
+      publish: "Publicando rama en Git...",
+      sync: "Sincronizando cambios con Git...",
+      "abort-merge": "Abortando merge...",
+      "abort-rebase": "Abortando rebase...",
+    };
+    try {
+      await dialogs.withBusy(labels[op] ?? "Ejecutando operación Git...", async () => {
+        await gitClient.remoteOp(root, op, g.branch);
+        await refresh();
+      });
+    } catch (e) {
+      await dialogs.error(`Error en operación Git (${op}).\n\n${String(e)}`);
+      await refreshGit();
+    }
+  }
+
+  async function gitOpenDiff(entry: GitFileStatus, mode: "working" | "staged") {
+    const root = repoRoot();
+    if (!root) return;
+    const fullPath = joinPath(root, entry.path);
+    const leftText = await gitClient.showFile(root, "HEAD", entry.path).catch(() => "");
+    let rightText = "";
+    if (mode === "staged") {
+      rightText = await gitClient.showFile(root, ":0", entry.path).catch(() => "");
+    } else {
+      rightText = st().tabs.some((t) => t.path === fullPath)
+        ? editor.getText(fullPath)
+        : await fs.readText(fullPath).catch(() => "");
+    }
+
+    const diff: DiffPayload = {
+      id: `git-diff://${mode}/${entry.path}`,
+      title: `${entry.path} (${mode === "staged" ? "Staged" : "Working Tree"})`,
+      relPath: entry.path,
+      repoRoot: root,
+      leftTitle: "HEAD",
+      rightTitle: mode === "staged" ? "Index (Staged)" : "Working Tree",
+      leftText,
+      rightText,
+      mode,
+    };
+    openDiffTab(diff);
+  }
+
+  async function gitOpenCommitDiff(hash: string, file: GitCommitFile) {
+    const root = repoRoot();
+    if (!root) return;
+    const leftPath = file.old_path ?? file.path;
+    const leftText = await gitClient.showFile(root, `${hash}^`, leftPath).catch(() => "");
+    const rightText = await gitClient.showFile(root, hash, file.path).catch(() => "");
+
+    openDiffTab({
+      id: `git-diff://commit/${hash}/${file.path}`,
+      title: `${file.path} (${hash.slice(0, 7)})`,
+      relPath: file.path,
+      repoRoot: root,
+      leftTitle: `${hash.slice(0, 7)}^`,
+      rightTitle: hash.slice(0, 7),
+      leftText,
+      rightText,
+      mode: "commit",
+    });
+  }
+
+  function openDiffTab(diff: DiffPayload) {
+    editor.openDiff(diff);
+    store.dispatch({ type: "tab/open", path: diff.id });
+  }
+
+  async function gitAddToGitignore(relPath: string) {
+    const root = repoRoot();
+    if (!root) return;
+    try {
+      await gitClient.addGitignore(root, relPath);
+      await refreshGit();
+    } catch (e) {
+      await dialogs.error(`No se pudo actualizar .gitignore.\n\n${String(e)}`);
+    }
+  }
+
+  async function gitReloadAfterDiffMutation(repoPath: string, relPath: string) {
+    const fullPath = joinPath(repoPath, relPath);
+    if (st().tabs.some((t) => t.path === fullPath)) {
+      const disk = await fs.readText(fullPath).catch(() => "");
+      editor.setText(fullPath, disk);
+      store.dispatch({ type: "tab/dirty", path: fullPath, dirty: false });
+    }
+    const active = st().activePath;
+    if (active?.startsWith("git-diff://")) {
+      const mode = active.startsWith("git-diff://staged/") ? "staged" : "working";
+      const leftText = await gitClient.showFile(repoPath, "HEAD", relPath).catch(() => "");
+      const rightText = mode === "staged"
+        ? await gitClient.showFile(repoPath, ":0", relPath).catch(() => "")
+        : await fs.readText(fullPath).catch(() => "");
+      editor.openDiff({
+        id: active,
+        title: `${relPath} (${mode === "staged" ? "Staged" : "Working Tree"})`,
+        relPath,
+        repoRoot: repoPath,
+        leftTitle: "HEAD",
+        rightTitle: mode === "staged" ? "Index (Staged)" : "Working Tree",
+        leftText,
+        rightText,
+        mode,
+      });
+      editor.activate(active);
+    }
+    await refreshGit();
+  }
+
   return {
     openFolder,
     refresh,
@@ -232,6 +520,20 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
     createEntry,
     deleteFile,
     renameEntry,
+    refreshGit,
+    scheduleGitRefresh,
+    gitInit,
+    gitStage,
+    gitUnstage,
+    gitDiscard,
+    gitCommit,
+    gitUndoLastCommit,
+    gitRemoteOp,
+    gitOpenDiff,
+    gitOpenCommitDiff,
+    openDiffTab,
+    gitAddToGitignore,
+    gitReloadAfterDiffMutation,
     collapseAll: () => store.dispatch({ type: "tree/collapseAll" }),
   };
 }

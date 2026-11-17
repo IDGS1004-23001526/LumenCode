@@ -119,7 +119,7 @@ function renderAnsi(raw: string): DocumentFragment {
     return frag;
 }
 
-function createTerminalView(term: TerminalPort) {
+function createTerminalView(term: TerminalPort, onCommandDone?: (cmd: string) => void) {
     const out = h("div", { class: "term-output" });
     const promptEl = h("span", { class: "term-prompt" });
     const input = h("input", { class: "term-input", spellcheck: "false", autocomplete: "off", "aria-label": "Terminal" }) as HTMLInputElement;
@@ -183,6 +183,7 @@ function createTerminalView(term: TerminalPort) {
                 print(String(err), "error");
             } finally {
                 busy = false;
+                onCommandDone?.(cmd);
             }
         }
 
@@ -196,10 +197,15 @@ function createTerminalView(term: TerminalPort) {
     return { root, refreshPrompt, focus: () => input.focus() };
 }
 
-export function mountBottomPanel(el: HTMLElement, store: AppStore, terminal: TerminalPort) {
+export function mountBottomPanel(
+    el: HTMLElement,
+    store: AppStore,
+    terminal: TerminalPort,
+    onTerminalCommand?: (cmd: string) => void,
+) {
     const header = h("div", { class: "panel-tabs", role: "tab-list" });
     const body = h("div", { class: "panel-body" });
-    const termView = createTerminalView(terminal);
+    const termView = createTerminalView(terminal, onTerminalCommand);
 
     const views: Record<PanelView, HTMLElement> = {
         problems: h("div", { class: "panel-view placeholder" }, "No se han detectado problemas en el área de trabajo"),

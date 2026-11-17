@@ -1,6 +1,7 @@
 import type { AppState } from "../../domain/types";
 import type { AppStore } from "../../application/reducer";
 import type { UseCases } from "../../application/useCases";
+import { toRelativeRepoPath } from "../../infraestructure/gitClient";
 import { animateTabIn, animateTabOut, captureTabsFlip, playTabsFlip } from "../animate";
 import { cx, h, iconButton } from "../dom";
 import { ICONS } from "../icons";
@@ -12,9 +13,12 @@ export function mountTabBar(el: HTMLElement, store: AppStore, uc: UseCases) {
     el.append(list, h("div", { class: "tab-actions" }, panelBtn, gearBtn));
 
     function render(s: AppState) {
+        const g = s.git;
         list.replaceChildren(
             ...s.tabs.map((t) => {
                 const active = t.path === s.activePath;
+                const rel = g?.is_repo && g.root ? toRelativeRepoPath(g.root, t.path)?.toLowerCase() ?? null : null;
+                const gitEntry = rel ? g?.entries.find((e) => e.path.replace(/\\/g, "/").toLowerCase() === rel) : undefined;
 
                 return h(
                     "div",
@@ -27,7 +31,8 @@ export function mountTabBar(el: HTMLElement, store: AppStore, uc: UseCases) {
                         onclick: () => store.dispatch({ type: "tab/activate", path: t.path }),
                         onauxclick: (e: MouseEvent) => { if (e.button === 1) void uc.closeTab(t.path) },
                     },
-                    h("span", { class: "tab-name" }, t.name),
+                    h("span", { class: cx("tab-name", gitEntry && `git-label-${gitEntry.status}`) }, t.name),
+                    gitEntry ? h("span", { class: `git-badge git-${gitEntry.status}` }, gitEntry.status) : null,
                     t.dirty ? h("span", { class: "tab-dirty" }, "*") : null,
                     h("button", {
                         class: "tab-close",
@@ -65,6 +70,6 @@ export function mountTabBar(el: HTMLElement, store: AppStore, uc: UseCases) {
             for (const node of added) animateTabIn(node);
             return;
         }
-        if (s.activePath !== p.activePath || s.panelVisible !== p.panelVisible) render(s);
+        if (s.activePath !== p.activePath || s.panelVisible !== p.panelVisible || s.git !== p.git) render(s);
     });
 }

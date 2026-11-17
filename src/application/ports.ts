@@ -1,3 +1,4 @@
+import type { DiffPayload } from "../domain/git";
 import type { FileNode, Settings } from "../domain/types";
 
 export interface FileSystemPort {
@@ -16,16 +17,19 @@ export interface DialogPort {
   confirm(message: string, okLabel?: string): Promise<boolean>;
   error(message: string): Promise<void>;
   prompt(label: string, options?: { initialValue?: string; confirmLabel?: string }): Promise<string | null>;
+  withBusy<T>(label: string, task: () => Promise<T>): Promise<T>;
 }
 
 export interface EditorPort {
   open(path: string, content: string): void;
   openImage(path: string, url: string, byteSize: number): void;
+  openDiff(diff: DiffPayload): void;
   activate(path: string | null): void;
   revealPosition(path: string, line: number, character: number): void;
   rename(oldPath: string, newPath: string): void;
   close(path: string): void;
   getText(path: string): string;
+  setText(path: string, content: string): void;
   focus(): void;
   remeasure(): void;
 }

@@ -1,4 +1,5 @@
-import type { AppState, FileNode, PanelView, Settings } from "../domain/types";
+import type { GitStatus } from "../domain/git";
+import type { AppState, FileNode, PanelView, Settings, SidebarView } from "../domain/types";
 import { setChildren } from "../domain/fileTree";
 import { fileNameOf } from "../domain/path";
 import { nextActiveAfterClose } from "../domain/tabs";
@@ -17,6 +18,8 @@ export type Action =
   | { type: "panel/toggle" }
   | { type: "panel/show"; view: PanelView }
   | { type: "sidebar/toggle" }
+  | { type: "sidebar/view"; view: SidebarView }
+  | { type: "git/status"; status: GitStatus | null }
   | { type: "settings/open"; open: boolean }
   | { type: "settings/update"; patch: Partial<Settings> };
 
@@ -29,10 +32,12 @@ export const initialState = (settings: Settings): AppState => ({
   tabs: [],
   activePath: null,
   sidebarVisible: true,
+  sidebarView: "explorer",
   panelVisible: true,
   panelView: "terminal",
   settingsOpen: false,
   settings,
+  git: null,
 });
 
 export function reducer(s: AppState, a: Action): AppState {
@@ -103,6 +108,10 @@ export function reducer(s: AppState, a: Action): AppState {
       return { ...s, panelVisible: true, panelView: a.view };
     case "sidebar/toggle":
       return { ...s, sidebarVisible: !s.sidebarVisible };
+    case "sidebar/view":
+      return { ...s, sidebarVisible: true, sidebarView: a.view };
+    case "git/status":
+      return { ...s, git: a.status };
     case "settings/open":
       return s.settingsOpen === a.open ? s : { ...s, settingsOpen: a.open };
     case "settings/update":
