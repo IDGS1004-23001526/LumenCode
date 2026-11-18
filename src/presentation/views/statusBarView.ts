@@ -71,7 +71,7 @@ export function mountStatusBar(
             {
               class: "status-item",
               title: "Ver cambios en Source Control (Ctrl+Shift+G)",
-              onclick: () => store.dispatch({ type: "sidebar/view", view: "git" }),
+              onclick: () => store.dispatch({ type: "git/toggle" }),
             },
             `● ${g.entries.length}`,
           ),

@@ -15,7 +15,6 @@ export interface Tab {
     dirty: boolean;
 }
 
-export type SidebarView = "explorer" | "git";
 export type PanelView = "problems" | "output" | "debug" | "terminal";
 export type CursorBlinking = "blink" | "smooth" | "phase" | "expand" | "solid"; 
 
@@ -80,7 +79,7 @@ export interface AppState {
     tabs: Tab[];
     activePath: string | null;
     sidebarVisible: boolean;
-    sidebarView: SidebarView;
+    gitOpen: boolean;
     panelVisible: boolean;
     panelView: PanelView;
     settingsOpen: boolean;
