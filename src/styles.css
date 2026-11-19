@@ -548,6 +548,12 @@ kbd { font: 11px var(--editor-font); color: var(--fg-muted); }
   pointer-events: none;
   user-select: none;
   opacity: 0.9;
+  max-width: 55vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+  vertical-align: bottom;
 }
 .cm-el-inline-error { color: #e5534b; }
 .cm-el-inline-warning { color: #d29922; }
@@ -566,6 +572,70 @@ kbd { font: 11px var(--editor-font); color: var(--fg-muted); }
 .cm-el-gutter-error { color: #e5534b; }
 .cm-el-gutter-warning { color: #d29922; }
 .cm-el-gutter-info { color: var(--accent); }
+
+.cm-tooltip-autocomplete {
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.24);
+  overflow: hidden;
+  font-family: var(--editor-font);
+  font-size: 12.5px;
+}
+.cm-tooltip.cm-tooltip-autocomplete > ul {
+  min-width: 280px;
+  max-width: min(520px, 75vw);
+  max-height: 260px;
+}
+.cm-tooltip-autocomplete > ul > li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px !important;
+}
+.cm-tooltip-autocomplete .cm-completionLabel {
+  color: var(--fg);
+}
+.cm-tooltip-autocomplete .cm-completionMatchedText {
+  text-decoration: none;
+  font-weight: 700;
+  color: var(--accent);
+}
+.cm-tooltip-autocomplete .cm-completionDetail {
+  margin-left: auto;
+  padding-left: 14px;
+  font-style: normal;
+  font-size: 11px;
+  color: var(--fg-muted);
+  opacity: 0.9;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.problems-view {
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  padding: 4px 6px;
+  gap: 2px;
+}
+.problem-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  border-radius: 6px;
+  text-align: left;
+  font-size: 12px;
+  color: var(--fg);
+}
+.problem-row:hover { background: var(--hover); }
+.problem-icon { flex: none; font-size: 11px; font-weight: 700; width: 14px; text-align: center; }
+.problem-sev-error { color: #e5534b; }
+.problem-sev-warning { color: #d29922; }
+.problem-sev-info { color: var(--accent); }
+.problem-msg { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.problem-source { flex: none; font-size: 11px; color: var(--fg-faint); }
+.problem-loc { flex: none; font-size: 11px; color: var(--fg-muted); }
 
 .icon-preview-row {
   align-items: center;

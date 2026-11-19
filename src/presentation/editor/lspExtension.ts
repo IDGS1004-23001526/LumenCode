@@ -1,4 +1,4 @@
-import { Prec, StateEffect, StateField, type Extension } from "@codemirror/state";
+import { Prec, StateEffect, StateField, type Extension, type Text } from "@codemirror/state";
 import type { Completion, CompletionContext, CompletionResult } from "@codemirror/autocomplete";
 import { Decoration, EditorView, hoverTooltip, keymap, type DecorationSet } from "@codemirror/view";
 import { joinPath, normalizePath, parentDirOf } from "../../domain/path";
@@ -40,15 +40,107 @@ function formatDoc(doc?: LspCompletionItem["documentation"]): string | undefined
   return text?.trim() || undefined;
 }
 
+function lspPosToOffset(doc: Text, pos: { line: number; character: number }): number {
+  const lineNum = Math.max(1, Math.min(doc.lines, pos.line + 1));
+  const line = doc.line(lineNum);
+  return Math.min(line.to, line.from + Math.max(0, pos.character));
+}
+
+function matchRank(candidate: string, query: string): number {
+  if (!query) return 1;
+  const c = candidate.toLowerCase();
+  const q = query.toLowerCase();
+  if (candidate.startsWith(query)) return 4;
+  if (c.startsWith(q)) return 3;
+  if (c.includes(q)) return 2;
+  let qi = 0;
+  for (let i = 0; i < c.length && qi < q.length; i++) {
+    if (c[i] === q[qi]) qi++;
+  }
+  return qi === q.length ? 1 : 0;
+}
+
+function stripLspSnippet(raw: string): string {
+  return raw
+    .replace(/\$\{\d+:([^}]*)\}/g, "$1")
+    .replace(/\$\d+/g, "")
+    .replace(/\$0/g, "");
+}
+
+function applyLspCompletionItem(
+  view: EditorView,
+  item: LspCompletionItem,
+  activePath: string,
+  from: number,
+  to: number,
+) {
+  const execute = (resolved: LspCompletionItem) => {
+    const doc = view.state.doc;
+    const rawInsert = resolved.textEdit?.newText ?? resolved.insertText ?? resolved.label;
+    const text = stripLspSnippet(rawInsert);
+    const mainFrom = resolved.textEdit ? lspPosToOffset(doc, resolved.textEdit.range.start) : from;
+    const mainTo = resolved.textEdit ? lspPosToOffset(doc, resolved.textEdit.range.end) : to;
+
+    const edits: { from: number; to: number; insert: string }[] = [
+      { from: mainFrom, to: mainTo, insert: text },
+    ];
+
+    let cursorDelta = 0;
+    for (const extra of resolved.additionalTextEdits ?? []) {
+      const eFrom = lspPosToOffset(doc, extra.range.start);
+      const eTo = lspPosToOffset(doc, extra.range.end);
+      const eText = extra.newText;
+      if (eTo <= mainFrom) {
+        cursorDelta += eText.length - (eTo - eFrom);
+      }
+      edits.push({ from: eFrom, to: eTo, insert: eText });
+    }
+
+    edits.sort((a, b) => a.from - b.from || a.to - b.to);
+    view.dispatch({
+      changes: edits,
+      selection: { anchor: mainFrom + cursorDelta + text.length },
+    });
+  };
+
+  if (!item.additionalTextEdits?.length && item.data !== undefined) {
+    execute(item);
+    void lspClient.resolveCompletion(activePath, item).then((resolved) => {
+      if (!resolved?.additionalTextEdits?.length) return;
+      const doc = view.state.doc;
+      const curText = doc.toString();
+      const extraEdits: { from: number; to: number; insert: string }[] = [];
+      for (const extra of resolved.additionalTextEdits) {
+        if (extra.newText.trim() && curText.includes(extra.newText.trim())) continue;
+        extraEdits.push({
+          from: lspPosToOffset(doc, extra.range.start),
+          to: lspPosToOffset(doc, extra.range.end),
+          insert: extra.newText,
+        });
+      }
+      if (extraEdits.length > 0) {
+        extraEdits.sort((a, b) => a.from - b.from || a.to - b.to);
+        view.dispatch({ changes: extraEdits });
+      }
+    });
+    return;
+  }
+
+  execute(item);
+}
+
 export function createLspCompletionSource(
   getIndex: () => ProjectIndex,
   getActivePath: () => string | null,
+  getAssetFiles?: () => Set<string>,
 ) {
-  const fallback = createSmartCompletionSource(getIndex, getActivePath);
+  const fallback = createSmartCompletionSource(getIndex, getActivePath, getAssetFiles);
 
   return async (ctx: CompletionContext): Promise<CompletionResult | null> => {
     const activePath = getActivePath();
-    if (!activePath) return null;
+    if (!activePath || !lspClient.hasActiveServerFor(activePath)) {
+      return null;
+    }
 
     const word = ctx.matchBefore(/[A-Za-z_$][\w$]*/);
     const dot = ctx.matchBefore(/(\.|::|->)$/);
@@ -61,25 +153,48 @@ export function createLspCompletionSource(
     const triggerChar = dot ? dot.text.slice(-1) : undefined;
 
     const lspItems = await lspClient.complete(activePath, line, character, triggerChar);
-    if (lspItems && lspItems.length > 0) {
-      const from = word ? word.from : ctx.pos;
-      const options: Completion[] = lspItems.slice(0, 80).map((item) => ({
+    if (!lspItems || lspItems.length === 0) {
+      return null;
+    }
+
+    const query = word?.text ?? "";
+    const from = word ? word.from : ctx.pos;
+
+    const ranked = lspItems
+      .map((item) => ({
+        item,
+        rank: matchRank(item.filterText ?? item.label, query),
+      }))
+      .filter((x) => !query || x.rank > 0)
+      .sort((a, b) => {
+        if (b.rank !== a.rank) return b.rank - a.rank;
+        return (a.item.sortText ?? a.item.label).localeCompare(b.item.sortText ?? b.item.label);
+      })
+      .slice(0, 80);
+
+    const options: Completion[] = ranked.map(({ item }) => {
+      const hasEdits = Boolean(item.additionalTextEdits?.length || item.textEdit || item.data !== undefined);
+      return {
         label: item.label,
         type: item.kind ? LSP_KIND_MAP[item.kind] ?? "text" : "text",
         detail: item.detail,
         info: formatDoc(item.documentation),
-        apply: item.textEdit?.newText ?? item.insertText ?? item.label,
-      }));
-
-      return {
-        from,
-        options,
-        validFor: /^[A-Za-z_$][\w$]*$/,
+        boost: item.additionalTextEdits?.length ? 75 : 40,
+        apply: hasEdits
+          ? (view, _c, applyFrom, applyTo) => applyLspCompletionItem(view, item, activePath, applyFrom, applyTo)
+          : stripLspSnippet(item.insertText ?? item.label),
       };
+    });
+
+    if (options.length === 0) {
+      return fallback(ctx);
     }
 
-    // Fallback instantáneo al autocompletado local ligero si no hay LSP instalado
-    return fallback(ctx);
+    return {
+      from,
+      options,
+      validFor: /^[A-Za-z_$][\w$]*$/,
+    };
   };
 }
 

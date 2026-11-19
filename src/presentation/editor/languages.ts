@@ -40,8 +40,14 @@ export const PLAIN: Lang = { name: "Texto plano", support: [] };
 export function languageFor(path: string | null): Lang {
   if (!path) return PLAIN;
   const fileName = path.split(/[\\/]/).pop()?.toLowerCase() ?? "";
-  if (fileName === "dockerfile") {
+  if (fileName === "dockerfile" || fileName.startsWith("dockerfile.")) {
     return { name: "Dockerfile", support: StreamLanguage.define(dockerFile) };
+  }
+  if (fileName === "makefile" || fileName === ".gitignore" || fileName === ".dockerignore" || fileName === ".npmignore" || fileName.startsWith(".env")) {
+    return { name: fileName.startsWith(".env") ? "Env" : "Config", support: StreamLanguage.define(shell) };
+  }
+  if (fileName === ".editorconfig") {
+    return { name: "EditorConfig", support: StreamLanguage.define(toml) };
   }
 
   const ext = fileName.split(".").pop() ?? "";
@@ -151,7 +157,7 @@ export interface LspServerSpec {
 export function lspSpecFor(path: string | null): LspServerSpec | null {
   if (!path) return null;
   const fileName = path.split(/[\\/]/).pop()?.toLowerCase() ?? "";
-  if (fileName === "dockerfile") {
+  if (fileName === "dockerfile" || fileName.startsWith("dockerfile.")) {
     return { serverKey: "dockerfile", languageId: "dockerfile", candidates: [["docker-langserver", ["--stdio"]]] };
   }
 

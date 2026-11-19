@@ -25,7 +25,20 @@ struct LspClosedEvent {
 }
 
 fn spawn_candidate(program: &str, args: &[String], cwd: &str) -> std::io::Result<Child> {
-    let mut cmd_names = vec![program.to_string()];
+    let mut cmd_names = Vec::new();
+    if !cwd.is_empty() {
+        let local_bin = std::path::Path::new(cwd).join("node_modules").join(".bin");
+        if local_bin.is_dir() {
+            #[cfg(target_os = "windows")]
+            if !program.contains('.') {
+                cmd_names.push(local_bin.join(format!("{program}.cmd")).to_string_lossy().into_owned());
+                cmd_names.push(local_bin.join(format!("{program}.exe")).to_string_lossy().into_owned());
+            }
+            cmd_names.push(local_bin.join(program).to_string_lossy().into_owned());
+        }
+    }
+
+    cmd_names.push(program.to_string());
     #[cfg(target_os = "windows")]
     if !program.contains('.') {
         cmd_names.push(format!("{program}.cmd"));

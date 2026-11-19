@@ -51,12 +51,15 @@ const dialogs: DialogPort = {
 };
 const terminal = new NativeTerminal(); // Aquí invoca PowerShell en Win, zsh en Mac o bash en Linux
 const indexer = new WorkspaceIndexer(fs);
+let bottomPanel: ReturnType<typeof mountBottomPanel> | null = null;
+let statusBar: ReturnType<typeof mountStatusBar> | null = null;
 const editor = createCodeMirrorEditor($("editor"), {
   onChange: (path, content) => {
     store.dispatch({ type: "tab/dirty", path, dirty: true });
     indexer.updateFile(path, content);
   },
   getIndex: () => indexer.index,
+  getAssetFiles: () => indexer.assetFiles,
   getRootPath: () => store.getState().rootPath,
   readText: (path) => fs.readText(path),
   onNavigate: (path, line, character) => void uc.openFileAt(path, line, character),
@@ -65,6 +68,8 @@ const editor = createCodeMirrorEditor($("editor"), {
   onDiffMutated: (repoRoot, relPath) => uc.gitReloadAfterDiffMutation(repoRoot, relPath),
   confirmAction: (msg, okLabel) => dialogs.confirm(msg, okLabel),
   onError: (msg) => dialogs.error(msg),
+  onDiagnostics: (path, diags) => bottomPanel?.updateDiagnostics(path, diags),
+  onIndentChange: (label) => statusBar?.setIndentation(label),
 });
 
 // Casos de uso
@@ -75,14 +80,20 @@ mountTitlebar($("titlebar"), store);
 mountExplorer($("sidebar"), store, uc);
 mountSourceControl(store, uc, dialogs.error);
 mountTabBar($("tabbar"), store, uc);
-mountBottomPanel($("panel"), store, terminal, (cmd) => {
-  if (/^\s*git\b/i.test(cmd)) {
-    void uc.refresh();
-  } else {
-    uc.scheduleGitRefresh();
-  }
-});
-mountStatusBar($("statusbar"), store, uc, dialogs.error);
+bottomPanel = mountBottomPanel(
+  $("panel"),
+  store,
+  terminal,
+  (cmd) => {
+    if (/^\s*git\b/i.test(cmd)) {
+      void uc.refresh();
+    } else {
+      uc.scheduleGitRefresh();
+    }
+  },
+  (path, line, character) => void uc.openFileAt(path, line, character),
+);
+statusBar = mountStatusBar($("statusbar"), store, uc, dialogs.error);
 mountResizers($("sidebar"), $("panel"), () => editor.remeasure());
 mountSettingsModal(store);
 registerShortcuts(store, uc);
@@ -193,6 +204,7 @@ function applySettings(s: Settings) {
     activeTheme.colors["--accent"] ?? "#5D9CEC",
   );
   settingsRepo.save(s);
+  editor.configure({ tabSize: s.tabSize, wordWrap: s.wordWrap });
   editor.remeasure();
 }
 
