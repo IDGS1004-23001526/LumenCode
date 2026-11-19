@@ -3,6 +3,11 @@ import { listen } from "@tauri-apps/api/event";
 import { normalizePath } from "../domain/path";
 import { lspSpecFor, type LspServerSpec } from "../presentation/editor/languages";
 
+export interface LspTextEdit {
+  range: { start: { line: number; character: number }; end: { line: number; character: number } };
+  newText: string;
+}
+
 export interface LspCompletionItem {
   label: string;
   kind?: number;
@@ -11,10 +16,9 @@ export interface LspCompletionItem {
   sortText?: string;
   filterText?: string;
   insertText?: string;
-  textEdit?: {
-    range: { start: { line: number; character: number }; end: { line: number; character: number } };
-    newText: string;
-  };
+  textEdit?: LspTextEdit;
+  additionalTextEdits?: LspTextEdit[];
+  data?: unknown;
 }
 
 export interface LspHoverResult {
@@ -213,7 +217,10 @@ class LspClientManager {
               completion: {
                 completionItem: {
                   snippetSupport: false,
-                  documentationFormat: ["plaintext", "markdown"],
+                  documentationFormat: ["markdown", "plaintext"],
+                  resolveSupport: {
+                    properties: ["documentation", "detail", "additionalTextEdits"],
+                  },
                 },
               },
               hover: { contentFormat: ["markdown", "plaintext"] },
@@ -365,6 +372,19 @@ class LspClientManager {
       );
       if (!res) return null;
       return Array.isArray(res) ? res : res.items ?? [];
+    } catch {
+      return null;
+    }
+  }
+
+  async resolveCompletion(path: string, item: LspCompletionItem): Promise<LspCompletionItem | null> {
+    const doc = this.openDocs.get(path);
+    if (!doc) return null;
+    const session = this.sessions.get(doc.serverKey);
+    if (!session || !session.initialized) return null;
+
+    try {
+      return await this.sendRequest<LspCompletionItem | null>(session, "completionItem/resolve", item, 800);
     } catch {
       return null;
     }

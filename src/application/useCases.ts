@@ -85,6 +85,9 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
       const text = await fs.readText(path);
       editor.open(path, text);
       indexer.updateFile(path, text);
+      if (indexer.index.files.size <= 1) {
+        void indexer.scanDirectory(parentDirOf(path));
+      }
       store.dispatch({ type: "tab/open", path });
     } catch (e) {
       await dialogs.error(`No se pudo abrir el archivo.\n\n${String(e)}`);
@@ -108,7 +111,9 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
     const path = st().activePath;
     if (!path) return;
     try {
-      await fs.writeText(path, editor.getText(path));
+      const content = editor.getText(path);
+      await fs.writeText(path, content);
+      indexer.updateFile(path, content);
       store.dispatch({ type: "tab/dirty", path, dirty: false });
       scheduleGitRefresh();
     } catch (e) {

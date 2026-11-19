@@ -8,9 +8,14 @@ import { ICONS } from "../icons";
 
 export function mountTabBar(el: HTMLElement, store: AppStore, uc: UseCases) {
     const list = h("div", { class: "tabs", role: "tablist" });
+    const gitBadge = h("span", { class: "git-trigger-badge", hidden: true }, "0");
+    const gitBtn = iconButton(ICONS.git, "Source Control (Ctrl+Shift+G)", () => store.dispatch({ type: "git/toggle" }));
+    gitBtn.classList.add("git-trigger-btn");
+    gitBtn.dataset.gitTrigger = "true";
+    gitBtn.append(gitBadge);
     const panelBtn = iconButton(ICONS.panel, "Mostrar/ocultar panel (Ctrl+`)", () => store.dispatch({ type: "panel/toggle" }));
     const gearBtn = iconButton(ICONS.gear, "Configuración (Ctrl + ,)", () => store.dispatch({ type: "settings/open", open: true }));
-    el.append(list, h("div", { class: "tab-actions" }, panelBtn, gearBtn));
+    el.append(list, h("div", { class: "tab-actions" }, gitBtn, panelBtn, gearBtn));
 
     function render(s: AppState) {
         const g = s.git;
@@ -46,6 +51,10 @@ export function mountTabBar(el: HTMLElement, store: AppStore, uc: UseCases) {
 
         list.querySelector(".tab.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
         panelBtn.classList.toggle("on", s.panelVisible);
+        gitBtn.classList.toggle("on", s.gitOpen);
+        const count = s.git?.is_repo ? s.git.entries.length : 0;
+        gitBadge.hidden = count === 0;
+        gitBadge.textContent = count > 99 ? "99+" : String(count);
     }
 
     render(store.getState());
@@ -70,6 +79,6 @@ export function mountTabBar(el: HTMLElement, store: AppStore, uc: UseCases) {
             for (const node of added) animateTabIn(node);
             return;
         }
-        if (s.activePath !== p.activePath || s.panelVisible !== p.panelVisible || s.git !== p.git) render(s);
+        if (s.activePath !== p.activePath || s.panelVisible !== p.panelVisible || s.gitOpen !== p.gitOpen || s.git !== p.git) render(s);
     });
 }

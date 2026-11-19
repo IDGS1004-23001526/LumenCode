@@ -32,7 +32,6 @@ import { mountTitlebar } from "./presentation/views/titlebarView";
 import { mountTabBar } from "./presentation/editor/tabBarView";
 import { mountBottomPanel } from "./presentation/editor/bottomPanelView";
 import { mountSettingsModal } from "./presentation/editor/settingsModal";
-import { h } from "./presentation/dom";
 import { showContextMenu } from "./presentation/contextMenu";
 import { WorkspaceIndexer } from "./application/workspaceIndexer";
 
@@ -52,12 +51,15 @@ const dialogs: DialogPort = {
 };
 const terminal = new NativeTerminal(); // Aquí invoca PowerShell en Win, zsh en Mac o bash en Linux
 const indexer = new WorkspaceIndexer(fs);
+let bottomPanel: ReturnType<typeof mountBottomPanel> | null = null;
+let statusBar: ReturnType<typeof mountStatusBar> | null = null;
 const editor = createCodeMirrorEditor($("editor"), {
   onChange: (path, content) => {
     store.dispatch({ type: "tab/dirty", path, dirty: true });
     indexer.updateFile(path, content);
   },
   getIndex: () => indexer.index,
+  getAssetFiles: () => indexer.assetFiles,
   getRootPath: () => store.getState().rootPath,
   readText: (path) => fs.readText(path),
   onNavigate: (path, line, character) => void uc.openFileAt(path, line, character),
@@ -66,6 +68,8 @@ const editor = createCodeMirrorEditor($("editor"), {
   onDiffMutated: (repoRoot, relPath) => uc.gitReloadAfterDiffMutation(repoRoot, relPath),
   confirmAction: (msg, okLabel) => dialogs.confirm(msg, okLabel),
   onError: (msg) => dialogs.error(msg),
+  onDiagnostics: (path, diags) => bottomPanel?.updateDiagnostics(path, diags),
+  onIndentChange: (label) => statusBar?.setIndentation(label),
 });
 
 // Casos de uso
@@ -73,46 +77,26 @@ const uc = createUseCases({ store, fs, dialogs, editor, terminal, indexer });
 
 // Vistas
 mountTitlebar($("titlebar"), store);
-mountExplorer($("explorer-pane"), store, uc);
-mountSourceControl($("git-pane"), store, uc, dialogs.error);
+mountExplorer($("sidebar"), store, uc);
+mountSourceControl(store, uc, dialogs.error);
 mountTabBar($("tabbar"), store, uc);
-mountBottomPanel($("panel"), store, terminal, (cmd) => {
-  if (/^\s*git\b/i.test(cmd)) {
-    void uc.refresh();
-  } else {
-    uc.scheduleGitRefresh();
-  }
-});
-mountStatusBar($("statusbar"), store, uc, dialogs.error);
+bottomPanel = mountBottomPanel(
+  $("panel"),
+  store,
+  terminal,
+  (cmd) => {
+    if (/^\s*git\b/i.test(cmd)) {
+      void uc.refresh();
+    } else {
+      uc.scheduleGitRefresh();
+    }
+  },
+  (path, line, character) => void uc.openFileAt(path, line, character),
+);
+statusBar = mountStatusBar($("statusbar"), store, uc, dialogs.error);
 mountResizers($("sidebar"), $("panel"), () => editor.remeasure());
 mountSettingsModal(store);
 registerShortcuts(store, uc);
-
-const switcherEl = $("sidebar-switcher");
-const expSwitchBtn = h("button", {
-  class: "sidebar-tab active",
-  onclick: () => store.dispatch({ type: "sidebar/view", view: "explorer" }),
-}, "Explorer");
-const gitBadgeCount = h("span", { class: "sidebar-tab-badge", hidden: true }, "0");
-const gitSwitchBtn = h("button", {
-  class: "sidebar-tab",
-  title: "Source Control (Ctrl+Shift+G)",
-  onclick: () => store.dispatch({ type: "sidebar/view", view: "git" }),
-}, "Git", gitBadgeCount);
-switcherEl.append(expSwitchBtn, gitSwitchBtn);
-
-function syncSidebarView() {
-  const s = store.getState();
-  const isGit = s.sidebarView === "git";
-  $("explorer-pane").hidden = isGit;
-  $("git-pane").hidden = !isGit;
-  expSwitchBtn.classList.toggle("active", !isGit);
-  gitSwitchBtn.classList.toggle("active", isGit);
-  const count = s.git?.is_repo ? s.git.entries.length : 0;
-  gitBadgeCount.hidden = count === 0;
-  gitBadgeCount.textContent = String(count);
-}
-syncSidebarView();
 
 window.addEventListener("focus", () => uc.scheduleGitRefresh());
 
@@ -220,13 +204,13 @@ function applySettings(s: Settings) {
     activeTheme.colors["--accent"] ?? "#5D9CEC",
   );
   settingsRepo.save(s);
+  editor.configure({ tabSize: s.tabSize, wordWrap: s.wordWrap });
   editor.remeasure();
 }
 
 store.subscribe((s, p) => {
   if (s.rootPath !== p.rootPath) void lspClient.stopAll();
   if (s.activePath !== p.activePath) editor.activate(s.activePath);
-  if (s.sidebarView !== p.sidebarView || s.git !== p.git) syncSidebarView();
   if (s.settings !== p.settings) applySettings(s.settings);
   if (s.sidebarVisible !== p.sidebarVisible) {
     const appEl = $("app");

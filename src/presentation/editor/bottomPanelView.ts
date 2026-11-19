@@ -3,6 +3,7 @@ import type { AppStore } from "../../application/reducer";
 import type { TerminalPort } from "../../application/ports";
 import { animateCaelestiaIn, animateLayoutWithPanel } from "../animate";
 import { cx, h } from "../dom";
+import type { LumenDiagnostic } from "./errorLens";
 
 const VIEWS: { id: PanelView; label: string } [] = [
     { id: "problems", label: "Problems" },
@@ -202,13 +203,16 @@ export function mountBottomPanel(
     store: AppStore,
     terminal: TerminalPort,
     onTerminalCommand?: (cmd: string) => void,
+    onNavigate?: (path: string, line: number, character: number) => void,
 ) {
     const header = h("div", { class: "panel-tabs", role: "tab-list" });
     const body = h("div", { class: "panel-body" });
     const termView = createTerminalView(terminal, onTerminalCommand);
+    const problemsEl = h("div", { class: "panel-view problems-view" });
+    const problemsByFile = new Map<string, LumenDiagnostic[]>();
 
     const views: Record<PanelView, HTMLElement> = {
-        problems: h("div", { class: "panel-view placeholder" }, "No se han detectado problemas en el área de trabajo"),
+        problems: problemsEl,
         output: h("div", { class: "panel-view placeholder" }, "Sin salida"),
         debug: h("div", { class: "panel-view placeholder" }, "Inicia una sesión de depuración para usar la consola"),
         terminal: termView.root,
@@ -221,6 +225,47 @@ export function mountBottomPanel(
         return { id: v.id, b };
     });
 
+    function renderProblems() {
+        let total = 0;
+        const rows: HTMLElement[] = [];
+
+        for (const [filePath, diags] of problemsByFile) {
+            if (diags.length === 0) continue;
+            const fileName = filePath.split(/[\\/]/).pop() || filePath;
+            for (const d of diags) {
+                total++;
+                const icon = d.severity === "error" ? "✕" : d.severity === "warning" ? "▲" : "ℹ";
+                rows.push(
+                    h(
+                        "button",
+                        {
+                            class: `problem-row problem-row-${d.severity}`,
+                            title: `${filePath}:${d.line}:${d.column}\n${d.message}`,
+                            onclick: () => onNavigate?.(filePath, d.line - 1, d.column - 1),
+                        },
+                        h("span", { class: `problem-icon problem-sev-${d.severity}` }, icon),
+                        h("span", { class: "problem-msg" }, d.message),
+                        h("span", { class: "problem-loc" }, `${fileName} [${d.line}, ${d.column}]`),
+                    ),
+                );
+            }
+        }
+
+        const probTab = buttons.find((x) => x.id === "problems")?.b;
+        if (probTab) {
+            probTab.textContent = total > 0 ? `Problems (${total})` : "Problems";
+        }
+
+        if (rows.length === 0) {
+            problemsEl.className = "panel-view placeholder";
+            problemsEl.replaceChildren("No se han detectado problemas en el área de trabajo");
+        } else {
+            problemsEl.className = "panel-view problems-view";
+            problemsEl.replaceChildren(...rows);
+        }
+    }
+
+    renderProblems();
     el.append(header, body);
 
     function syncTabs(s: AppState) {
@@ -263,6 +308,18 @@ export function mountBottomPanel(
             }
         }
 
-        if (s.rootPath !== p.rootPath) termView.refreshPrompt();
+        if (s.rootPath !== p.rootPath) {
+            problemsByFile.clear();
+            renderProblems();
+            termView.refreshPrompt();
+        }
     });
+
+    return {
+        updateDiagnostics(path: string, diags: LumenDiagnostic[]) {
+            if (diags.length === 0) problemsByFile.delete(path);
+            else problemsByFile.set(path, diags);
+            renderProblems();
+        },
+    };
 }

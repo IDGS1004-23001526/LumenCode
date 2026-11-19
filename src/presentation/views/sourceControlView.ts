@@ -4,10 +4,10 @@ import type { GitCommitFile, GitCommitInfo, GitFileStatus, GitStashEntry } from 
 import { fileNameOf, joinPath } from "../../domain/path";
 import type { AppState } from "../../domain/types";
 import { gitClient } from "../../infraestructure/gitClient";
+import { animateGitPopoverIn, animateGitPopoverOut } from "../animate";
 import { cx, h } from "../dom";
 
 export function mountSourceControl(
-  el: HTMLElement,
   store: AppStore,
   uc: UseCases,
   onError: (msg: string) => Promise<void>,
@@ -21,12 +21,38 @@ export function mountSourceControl(
   let commits: GitCommitInfo[] = [];
   const expandedCommits = new Map<string, GitCommitFile[]>();
 
+  const el = h("aside", { class: "git-popover", hidden: true, role: "dialog", "aria-label": "Source Control" });
   const headerActions = h("div", { class: "sc-head-actions" });
   const bodyEl = h("div", { class: "sc-body" });
   el.append(
     h("div", { class: "sidebar-header" }, h("span", { class: "sidebar-title" }, "Source Control"), headerActions),
     bodyEl,
   );
+  document.body.append(el);
+
+  const getAnchor = () => document.querySelector<HTMLElement>("[data-git-trigger]");
+
+  function positionPopover() {
+    const anchor = getAnchor();
+    if (!anchor) return;
+    const rect = anchor.getBoundingClientRect();
+    el.style.top = `${Math.round(rect.bottom + 6)}px`;
+    el.style.right = `${Math.max(8, Math.round(window.innerWidth - rect.right))}px`;
+  }
+
+  document.addEventListener("pointerdown", (e) => {
+    if (!store.getState().gitOpen) return;
+    const target = e.target as HTMLElement | null;
+    if (!target) return;
+    if (el.contains(target) || target.closest("[data-git-trigger]") || target.closest("dialog[open]")) return;
+    store.dispatch({ type: "git/open", open: false });
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && store.getState().gitOpen && !document.querySelector("dialog[open]")) {
+      store.dispatch({ type: "git/open", open: false });
+    }
+  });
 
   async function loadExtras(root: string) {
     if (stashOpen) {
@@ -380,6 +406,19 @@ export function mountSourceControl(
 
   render(store.getState());
   store.subscribe((s, p) => {
+    if (s.gitOpen !== p.gitOpen) {
+      const anchor = getAnchor();
+      if (s.gitOpen) {
+        render(s);
+        el.hidden = false;
+        positionPopover();
+        animateGitPopoverIn(el, anchor);
+      } else {
+        animateGitPopoverOut(el, anchor, () => {
+          if (!store.getState().gitOpen) el.hidden = true;
+        });
+      }
+    }
     if (s.git !== p.git || s.rootPath !== p.rootPath) {
       render(s);
       if (s.git?.is_repo && (stashOpen || historyOpen)) {

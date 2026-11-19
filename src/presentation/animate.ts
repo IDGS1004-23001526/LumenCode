@@ -563,3 +563,75 @@ export function animateEditorContentOut(el: HTMLElement): void {
     onComplete: () => wrapper.remove(),
   });
 }
+
+export function animateGitPopoverIn(el: HTMLElement, anchor: HTMLElement | null): void {
+  if (!shouldAnimate()) return;
+  gsap.killTweensOf(el);
+  const elRect = el.getBoundingClientRect();
+  const anchorRect = anchor?.getBoundingClientRect();
+  const originX = anchorRect
+    ? Math.max(0, Math.min(elRect.width, anchorRect.left + anchorRect.width / 2 - elRect.left))
+    : elRect.width - 20;
+  const dx = anchorRect ? anchorRect.left + anchorRect.width / 2 - (elRect.left + originX) : 0;
+  const dy = anchorRect ? anchorRect.top + anchorRect.height / 2 - elRect.top : -12;
+
+  gsap.fromTo(
+    el,
+    {
+      opacity: 0,
+      scale: 0.18,
+      x: dx,
+      y: dy,
+      borderRadius: "28px",
+      filter: "blur(6px)",
+      transformOrigin: `${originX}px 0px`,
+    },
+    {
+      opacity: 1,
+      scale: 1,
+      x: 0,
+      y: 0,
+      borderRadius: "10px",
+      filter: "blur(0px)",
+      duration: 0.36,
+      ease: PRETTY_MODAL_EASE,
+      clearProps: "transform,opacity,borderRadius,filter,transformOrigin",
+    },
+  );
+}
+
+export function animateGitPopoverOut(
+  el: HTMLElement,
+  anchor: HTMLElement | null,
+  onDone: () => void,
+): void {
+  const finish = () => {
+    el.removeAttribute("style");
+    onDone();
+  };
+  if (!shouldAnimate()) {
+    finish();
+    return;
+  }
+  gsap.killTweensOf(el);
+  const elRect = el.getBoundingClientRect();
+  const anchorRect = anchor?.getBoundingClientRect();
+  const originX = anchorRect
+    ? Math.max(0, Math.min(elRect.width, anchorRect.left + anchorRect.width / 2 - elRect.left))
+    : elRect.width - 20;
+  const dx = anchorRect ? anchorRect.left + anchorRect.width / 2 - (elRect.left + originX) : 0;
+  const dy = anchorRect ? anchorRect.top + anchorRect.height / 2 - elRect.top : -12;
+
+  gsap.to(el, {
+    opacity: 0,
+    scale: 0.18,
+    x: dx,
+    y: dy,
+    borderRadius: "28px",
+    filter: "blur(6px)",
+    transformOrigin: `${originX}px 0px`,
+    duration: 0.28,
+    ease: "power2.in",
+    onComplete: finish,
+  });
+}

@@ -30,6 +30,7 @@ export interface EditorPort {
   close(path: string): void;
   getText(path: string): string;
   setText(path: string, content: string): void;
+  configure(opts: { tabSize: number; wordWrap: boolean }): void;
   focus(): void;
   remeasure(): void;
 }

@@ -15,6 +15,8 @@ export function mountStatusBar(
   const rightEl = h("div", { class: "status-right" });
   el.append(leftEl, rightEl);
 
+  let indentLabel = `Espacios: ${store.getState().settings.tabSize}`;
+
   function render(s: AppState) {
     const leftItems: (HTMLElement | string)[] = [];
     const g = s.git;
@@ -71,7 +73,7 @@ export function mountStatusBar(
             {
               class: "status-item",
               title: "Ver cambios en Source Control (Ctrl+Shift+G)",
-              onclick: () => store.dispatch({ type: "sidebar/view", view: "git" }),
+              onclick: () => store.dispatch({ type: "git/toggle" }),
             },
             `● ${g.entries.length}`,
           ),
@@ -97,6 +99,7 @@ export function mountStatusBar(
 
     const lang = languageFor(s.activePath).name;
     rightEl.replaceChildren(
+      h("span", { class: "status-item", title: "Indentación del archivo actual" }, indentLabel),
       h("span", { class: "status-item" }, lang),
       h("span", { class: "status-item muted" }, "UTF-8"),
     );
@@ -104,8 +107,23 @@ export function mountStatusBar(
 
   render(store.getState());
   store.subscribe((s, p) => {
-    if (s.git !== p.git || s.activePath !== p.activePath || s.rootPath !== p.rootPath) {
+    if (s.settings.tabSize !== p.settings.tabSize) {
+      indentLabel = `Espacios: ${s.settings.tabSize}`;
+    }
+    if (
+      s.git !== p.git ||
+      s.activePath !== p.activePath ||
+      s.rootPath !== p.rootPath ||
+      s.settings.tabSize !== p.settings.tabSize
+    ) {
       render(s);
     }
   });
+
+  return {
+    setIndentation(label: string) {
+      indentLabel = label;
+      render(store.getState());
+    },
+  };
 }
