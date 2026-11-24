@@ -5,14 +5,32 @@ import { h } from "../dom";
 
 export interface ConflictBlock {
   startLine: number;
+  baseLine: number;
   sepLine: number;
   endLine: number;
   startPos: number;
   endPos: number;
   currentText: string;
+  baseText: string | null;
   incomingText: string;
   currentLabel: string;
   incomingLabel: string;
+}
+
+function isStartMarker(text: string): boolean {
+  return /^<{7}(?:\s|$)/.test(text);
+}
+
+function isBaseMarker(text: string): boolean {
+  return /^\|{7}(?:\s|$)/.test(text);
+}
+
+function isSepMarker(text: string): boolean {
+  return /^={7}\s*$/.test(text);
+}
+
+function isEndMarker(text: string): boolean {
+  return /^>{7}(?:\s|$)/.test(text);
 }
 
 export function findConflictBlocks(doc: EditorView["state"]["doc"]): ConflictBlock[] {
@@ -21,18 +39,27 @@ export function findConflictBlocks(doc: EditorView["state"]["doc"]): ConflictBlo
 
   while (line <= doc.lines) {
     const lineObj = doc.line(line);
-    if (lineObj.text.startsWith("<<<<<<<")) {
-      const startLine = line;
-      const currentLabel = lineObj.text.slice(7).trim() || "Current";
+    if (isStartMarker(lineObj.text)) {
+      let startLine = line;
+      let currentLabel = lineObj.text.slice(7).trim() || "Current";
+      let baseLine = -1;
       let sepLine = -1;
       let endLine = -1;
       let scan = line + 1;
 
       while (scan <= doc.lines) {
         const txt = doc.line(scan).text;
-        if (sepLine === -1 && txt.startsWith("=======")) {
+        if (isStartMarker(txt)) {
+          // Reinicia el bloque si aparece otro marcador de inicio sin haberse cerrado el anterior
+          startLine = scan;
+          currentLabel = txt.slice(7).trim() || "Current";
+          baseLine = -1;
+          sepLine = -1;
+        } else if (sepLine === -1 && baseLine === -1 && isBaseMarker(txt)) {
+          baseLine = scan;
+        } else if (sepLine === -1 && isSepMarker(txt)) {
           sepLine = scan;
-        } else if (sepLine !== -1 && txt.startsWith(">>>>>>>")) {
+        } else if (sepLine !== -1 && isEndMarker(txt)) {
           endLine = scan;
           break;
         }
@@ -42,19 +69,28 @@ export function findConflictBlocks(doc: EditorView["state"]["doc"]): ConflictBlo
       if (sepLine !== -1 && endLine !== -1) {
         const startPos = doc.line(startLine).from;
         const endPos = doc.line(endLine).to;
+        const currentEnd = baseLine !== -1 ? baseLine : sepLine;
         const curLines: string[] = [];
-        for (let i = startLine + 1; i < sepLine; i++) curLines.push(doc.line(i).text);
+        for (let i = startLine + 1; i < currentEnd; i++) curLines.push(doc.line(i).text);
+        let baseText: string | null = null;
+        if (baseLine !== -1) {
+          const baseLines: string[] = [];
+          for (let i = baseLine + 1; i < sepLine; i++) baseLines.push(doc.line(i).text);
+          baseText = baseLines.join("\n");
+        }
         const incLines: string[] = [];
         for (let i = sepLine + 1; i < endLine; i++) incLines.push(doc.line(i).text);
         const incomingLabel = doc.line(endLine).text.slice(7).trim() || "Incoming";
 
         blocks.push({
           startLine,
+          baseLine,
           sepLine,
           endLine,
           startPos,
           endPos,
           currentText: curLines.join("\n"),
+          baseText,
           incomingText: incLines.join("\n"),
           currentLabel,
           incomingLabel,
@@ -62,6 +98,8 @@ export function findConflictBlocks(doc: EditorView["state"]["doc"]): ConflictBlo
         line = endLine + 1;
         continue;
       }
+      // Si llegó al final sin cerrar ningún bloque, no tiene sentido seguir escaneando
+      break;
     }
     line++;
   }
@@ -88,8 +126,18 @@ class ConflictWidget extends WidgetType {
 
   toDOM(view: EditorView) {
     const resolveWith = (insert: string) => {
+      const doc = view.state.doc;
+      let from = this.block.startPos;
+      let to = this.block.endPos;
+      if (insert === "") {
+        if (to < doc.length && doc.sliceString(to, to + 1) === "\n") {
+          to += 1;
+        } else if (from > 0 && doc.sliceString(from - 1, from) === "\n") {
+          from -= 1;
+        }
+      }
       view.dispatch({
-        changes: { from: this.block.startPos, to: this.block.endPos, insert },
+        changes: { from, to, insert },
       });
     };
 
@@ -145,9 +193,19 @@ export function createGitConflictExtension(
       );
       builder.add(startLineObj.from, startLineObj.from, Decoration.line({ class: "cm-conflict-marker" }));
 
-      for (let ln = b.startLine + 1; ln < b.sepLine; ln++) {
+      const currentEnd = b.baseLine !== -1 ? b.baseLine : b.sepLine;
+      for (let ln = b.startLine + 1; ln < currentEnd; ln++) {
         const l = doc.line(ln);
         builder.add(l.from, l.from, Decoration.line({ class: "cm-conflict-current" }));
+      }
+
+      if (b.baseLine !== -1) {
+        const baseObj = doc.line(b.baseLine);
+        builder.add(baseObj.from, baseObj.from, Decoration.line({ class: "cm-conflict-marker" }));
+        for (let ln = b.baseLine + 1; ln < b.sepLine; ln++) {
+          const l = doc.line(ln);
+          builder.add(l.from, l.from, Decoration.line({ class: "cm-conflict-marker" }));
+        }
       }
 
       const sepObj = doc.line(b.sepLine);

@@ -6,18 +6,25 @@ import { closePrettyModal, openPrettyModal } from "../animate";
 import { cx, h } from "../dom";
 import { promptModal } from "../promptModal";
 
+let openingBranchModal = false;
+
 export async function openBranchModal(store: AppStore, uc: UseCases, onError: (msg: string) => Promise<void>) {
+  if (openingBranchModal || document.querySelector("dialog.branch-modal[open]")) return;
   const s = store.getState();
   const repoRoot = s.git?.root ?? s.rootPath;
   if (!repoRoot || !s.git?.is_repo) return;
   const root: string = repoRoot;
 
+  openingBranchModal = true;
   let data: GitBranches;
   try {
     data = await gitClient.branches(root);
   } catch (e) {
+    openingBranchModal = false;
     await onError(`No se pudieron listar las ramas.\n\n${String(e)}`);
     return;
+  } finally {
+    openingBranchModal = false;
   }
 
   let query = "";
@@ -59,12 +66,15 @@ export async function openBranchModal(store: AppStore, uc: UseCases, onError: (m
     }
   };
 
+  const isSafeBranchName = (name: string) =>
+    Boolean(name && !name.startsWith("-") && !name.includes("..") && !/[\s~^:?*[\\\x00-\x1f\x7f]/.test(name));
+
   function renderList() {
     const q = query.trim();
     const ql = q.toLowerCase();
     const items: HTMLElement[] = [];
 
-    if (q && !data.local.some((b) => b.toLowerCase() === ql)) {
+    if (q && isSafeBranchName(q) && !data.local.some((b) => b.toLowerCase() === ql)) {
       items.push(
         h(
           "button",
@@ -104,8 +114,13 @@ export async function openBranchModal(store: AppStore, uc: UseCases, onError: (m
               title: "Renombrar rama",
               onclick: async () => {
                 close();
-                const next = await promptModal(`Renombrar rama "${b}"`, { initialValue: b, confirmLabel: "Renombrar" });
+                const rawNext = await promptModal(`Renombrar rama "${b}"`, { initialValue: b, confirmLabel: "Renombrar" });
+                const next = rawNext?.trim() ?? "";
                 if (next && next !== b) {
+                  if (!isSafeBranchName(next)) {
+                    await onError(`Nombre de rama no válido: "${next}"`);
+                    return;
+                  }
                   try {
                     await gitClient.renameBranch(root, b, next);
                     await uc.refreshGit();
@@ -134,6 +149,9 @@ export async function openBranchModal(store: AppStore, uc: UseCases, onError: (m
 
     for (const rb of data.remote) {
       if (ql && !rb.toLowerCase().includes(ql)) continue;
+      const shortName = rb.replace(/^[^/]+\//, "");
+      const ambiguousRemote = data.remote.filter((r) => r.replace(/^[^/]+\//, "") === shortName).length > 1;
+      const checkoutTarget = ambiguousRemote ? rb : shortName;
       items.push(
         h(
           "div",
@@ -142,7 +160,7 @@ export async function openBranchModal(store: AppStore, uc: UseCases, onError: (m
             "button",
             {
               class: "branch-item",
-              onclick: () => void runAction(() => gitClient.checkout(root, rb.replace(/^[^/]+\//, ""), false)),
+              onclick: () => void runAction(() => gitClient.checkout(root, checkoutTarget, false)),
             },
             h("span", { class: "branch-name" }, rb),
             h("span", { class: "branch-tag" }, "remota"),

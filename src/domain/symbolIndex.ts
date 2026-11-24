@@ -157,7 +157,19 @@ export function stripComments(code: string, style: "c" | "hash" | "both" = "c"):
     const next = code[i + 1];
 
     // Cadenas con comillas simples, dobles o backticks
+    // Evita tratar apostrofes de texto JSX/ingles (`Don't`, `it's`) como apertura de string,
+    // pero respeta prefijos de string de Python (`f'...'`, `r'...'`, `b'...'`, `fr'...'`, etc.)
     if (ch === "'" || ch === '"' || ch === "`") {
+      if (ch === "'" && i > 0 && /[A-Za-z0-9]/.test(code[i - 1])) {
+        const before = code.slice(Math.max(0, i - 3), i);
+        const isPyPrefix =
+          style === "hash" && /(?:^|[^A-Za-z0-9_])(?:[fFbBrRuU]|[fFrR][rRfF]|[bBrR][rRbB])$/.test(before);
+        if (!isPyPrefix) {
+          out += ch;
+          i++;
+          continue;
+        }
+      }
       const quote = ch;
       out += ch;
       i++;
@@ -170,6 +182,8 @@ export function stripComments(code: string, style: "c" | "hash" | "both" = "c"):
           i++;
           continue;
         }
+        // Las cadenas con ' o " no cruzan saltos de linea sin escape; evita tragarse el resto del archivo
+        if (c === "\n" && quote !== "`") break;
         if (c === quote) break;
       }
       continue;
@@ -254,10 +268,11 @@ function parseJsTs(filePath: string, rawCode: string): ExportedSymbol[] {
   const defaultDeclMatch =
     /\bexport\s+default\s+(?:async\s+)?(?:function\*?\s+|(?:abstract\s+)?class\s+)?([A-Za-z_$][\w$]*)/.exec(code);
   const rawDefault = defaultDeclMatch?.[1] ?? null;
-  const defaultName = rawDefault && !JS_KEYWORDS.has(rawDefault) ? rawDefault : null;
+  let defaultName = rawDefault && !JS_KEYWORDS.has(rawDefault) ? rawDefault : null;
 
   // Recopila identificadores re-exportados explicitamente: `export { A, B as C }` y `export { X } from '...'`
   const namedExports = new Set<string>();
+  const exportAliases = new Map<string, string>(); // localName -> exportedName
   const localAliasedDecls = new Map<string, SymbolKind>();
   const exportBlockRegex = /\bexport\s+(?:type\s+)?\{([^}]+)\}(?:\s*from\s*['"][^'"]+['"])?/g;
   let m: RegExpExecArray | null;
@@ -268,11 +283,16 @@ function parseJsTs(filePath: string, rawCode: string): ExportedSymbol[] {
       if (!cleaned) continue;
       const asMatch = /^([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)$/.exec(cleaned);
       if (asMatch) {
-        if (asMatch[2] !== "default") {
-          namedExports.add(asMatch[2]);
-          if (isReexportFrom) localAliasedDecls.set(asMatch[2], /^[A-Z]/.test(asMatch[2]) ? "class" : "function");
+        const [, localName, exportedName] = asMatch;
+        if (exportedName === "default") {
+          if (!isReexportFrom) defaultName = localName;
+        } else {
+          exportAliases.set(localName, exportedName);
+          namedExports.add(exportedName);
+          if (isReexportFrom) {
+            localAliasedDecls.set(exportedName, /^[A-Z]/.test(exportedName) ? "class" : "function");
+          }
         }
-        namedExports.add(asMatch[1]);
       } else if (/^[A-Za-z_$][\w$]*$/.test(cleaned)) {
         namedExports.add(cleaned);
         if (isReexportFrom) localAliasedDecls.set(cleaned, /^[A-Z]/.test(cleaned) ? "class" : "function");
@@ -283,12 +303,15 @@ function parseJsTs(filePath: string, rawCode: string): ExportedSymbol[] {
   // 1. Clases (con conteo real de llaves)
   const classHeaderRegex = /\b(export\s+(?:default\s+)?)?(?:abstract\s+|declare\s+)*class\s+([A-Za-z_$][\w$]*)[^{]*\{/g;
   while ((m = classHeaderRegex.exec(code)) !== null) {
-    const className = m[2];
+    const localClassName = m[2];
     const openIdx = m.index + m[0].length - 1;
     const body = extractBraceBlock(code, openIdx);
-    const isDefault = Boolean(m[1]?.includes("default")) || className === defaultName;
-    const isExported = Boolean(m[1]) || isDefault || namedExports.has(className);
+    const isDefault = Boolean(m[1]?.includes("default")) || localClassName === defaultName;
+    const aliasedName = exportAliases.get(localClassName);
+    const isExported = Boolean(m[1]) || isDefault || namedExports.has(localClassName) || Boolean(aliasedName);
     if (!isExported) continue;
+
+    const exportedClassName = !m[1] && !isDefault && aliasedName ? aliasedName : localClassName;
 
     const members: MemberSymbol[] = [];
     for (const rawLine of body.split(/\r?\n/)) {
@@ -307,9 +330,9 @@ function parseJsTs(filePath: string, rawCode: string): ExportedSymbol[] {
       }
     }
 
-    if (!seen.has(className)) {
-      seen.add(className);
-      out.push({ name: className, kind: "class", filePath, isDefault, members });
+    if (!seen.has(exportedClassName)) {
+      seen.add(exportedClassName);
+      out.push({ name: exportedClassName, kind: "class", filePath, isDefault, members });
     }
   }
 
@@ -319,12 +342,16 @@ function parseJsTs(filePath: string, rawCode: string): ExportedSymbol[] {
   while ((m = declRegex.exec(code)) !== null) {
     const prefix = m[1];
     const kw = m[2].replace("*", "");
-    const name = m[3];
-    if (seen.has(name) || name.startsWith("_") || JS_KEYWORDS.has(name)) continue;
+    const localName = m[3];
+    if (localName.startsWith("_") || JS_KEYWORDS.has(localName)) continue;
 
-    const isDefault = prefix.includes("default") || name === defaultName;
-    const hasExport = prefix.includes("export") || isDefault || namedExports.has(name);
+    const isDefault = prefix.includes("default") || localName === defaultName;
+    const aliasedName = exportAliases.get(localName);
+    const hasExport = prefix.includes("export") || isDefault || namedExports.has(localName) || Boolean(aliasedName);
     if (!hasExport) continue;
+
+    const exportedName = !prefix.includes("export") && !isDefault && aliasedName ? aliasedName : localName;
+    if (seen.has(exportedName)) continue;
 
     const kindMap: Record<string, SymbolKind> = {
       function: "function",
@@ -335,21 +362,24 @@ function parseJsTs(filePath: string, rawCode: string): ExportedSymbol[] {
       type: "type",
       enum: "type",
     };
-    seen.add(name);
+    seen.add(exportedName);
     out.push({
-      name,
-      kind: /^[A-Z]/.test(name) && (kw === "function" || kw === "const") ? "function" : (kindMap[kw] ?? "variable"),
+      name: exportedName,
+      kind: /^[A-Z]/.test(exportedName) && (kw === "function" || kw === "const") ? "function" : (kindMap[kw] ?? "variable"),
       filePath,
       isDefault,
       members: [],
     });
   }
 
-  // 3. Declaraciones desestructuradas exportadas: `export const { a, b } = ...`
+  // 3. Declaraciones desestructuradas exportadas: `export const { a, b = 1, c: d = 2 } = ...`
   const destructExport = /\bexport\s+(?:const|let|var)\s+\{([^}]+)\}\s*=/g;
   while ((m = destructExport.exec(code)) !== null) {
     for (const part of m[1].split(",")) {
-      const id = part.trim().split(/[:=]/).pop()?.trim() ?? "";
+      const withoutDefault = part.split("=")[0].trim();
+      const id = withoutDefault.includes(":")
+        ? withoutDefault.split(":").pop()?.trim() ?? ""
+        : withoutDefault;
       if (/^[A-Za-z_$][\w$]*$/.test(id) && !seen.has(id) && !id.startsWith("_")) {
         seen.add(id);
         out.push({ name: id, kind: "variable", filePath, isDefault: false, members: [] });
@@ -574,6 +604,7 @@ export function buildAutoImportStatement(
 
   if (["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"].includes(ext)) {
     const spec = isPackage ? targetFileOrPkg : relativeModulePath(activeFile, targetFileOrPkg);
+    if (!spec) return null;
     return isDefault
       ? `import ${symbolName} from ${q}${spec}${q}${semi}\n`
       : `import { ${symbolName} } from ${q}${spec}${q}${semi}\n`;
@@ -585,10 +616,19 @@ export function buildAutoImportStatement(
         ? `import ${targetFileOrPkg}\n`
         : `from ${targetFileOrPkg} import ${symbolName}\n`;
     }
-    const rel = relativeModulePath(activeFile, targetFileOrPkg)
-      .replace(/^\.\//, "")
-      .replace(/\//g, ".");
-    return rel ? `from ${rel} import ${symbolName}\n` : null;
+    let rel = relativeModulePath(activeFile, targetFileOrPkg);
+    if (!rel) return null;
+    let upCount = 0;
+    while (rel.startsWith("../")) {
+      upCount++;
+      rel = rel.slice(3);
+    }
+    if (upCount > 0) {
+      const dotted = rel.replace(/\//g, ".");
+      return `from ${".".repeat(upCount + 1)}${dotted} import ${symbolName}\n`;
+    }
+    const cleanRel = rel.replace(/^\.\//, "").replace(/\//g, ".");
+    return cleanRel ? `from ${cleanRel} import ${symbolName}\n` : null;
   }
 
   if (ext === "rs") {
@@ -600,7 +640,9 @@ export function buildAutoImportStatement(
   }
 
   if (["c", "h", "cpp", "hpp", "cc", "cxx"].includes(ext) && !isPackage) {
-    const rel = relativeModulePath(activeFile, targetFileOrPkg).replace(/^\.\//, "");
+    const relPath = relativeModulePath(activeFile, targetFileOrPkg);
+    if (!relPath) return null;
+    const rel = relPath.replace(/^\.\//, "");
     return `#include "${rel}"\n`;
   }
 
@@ -617,38 +659,77 @@ export function buildAutoImportStatement(
 
   if (ext === "go") {
     const rel = relativeModulePath(activeFile, targetFileOrPkg);
+    if (!rel) return null;
     return `import "${rel}"\n`;
   }
 
   if (ext === "php") {
     if (opts.packageName) return `use ${opts.packageName}\\${symbolName};\n`;
     const rel = relativeModulePath(activeFile, targetFileOrPkg);
+    if (!rel) return null;
     return `require_once '${rel}.php';\n`;
   }
 
   if (ext === "dart") {
     const rel = relativeModulePath(activeFile, targetFileOrPkg);
+    if (!rel) return null;
     return `import '${rel}.dart';\n`;
   }
 
   if (ext === "rb") {
     const rel = relativeModulePath(activeFile, targetFileOrPkg);
+    if (!rel) return null;
     return `require_relative '${rel}'\n`;
   }
 
   return null;
 }
 
-export function relativeModulePath(fromFile: string, toFile: string): string {
-  const fromParts = fromFile.replace(/\\/g, "/").split("/").slice(0, -1);
-  const toParts = toFile
-    .replace(/\\/g, "/")
-    .replace(/\.(tsx?|mts|cts|jsx?|mjs|cjs|pyw?|rs|php|dart|rb)$/i, "")
-    .replace(/\/index$/i, "")
-    .split("/");
+/** Devuelve la raíz "importable" de una ruta, o null si es relativa. */
+function moduleRoot(p: string): string | null {
+  if (p.startsWith("//")) {
+    const segs = p.slice(2).split("/").filter(Boolean);
+    if (segs.length === 0) return null;
+    return `//${segs.slice(0, 2).join("/")}`;
+  }
+  if (/^[A-Za-z]:\//.test(p)) return p.slice(0, 2);
+  if (p.startsWith("/")) return "/";
+  return null;
+}
 
+/**
+ * Calcula la ruta relativa entre dos archivos para un import.
+ * Devuelve `null` cuando están en raíces distintas (unidades/UNC diferentes):
+ * esas rutas no se pueden expresar como import relativo válido.
+ */
+export function relativeModulePath(fromFile: string, toFile: string): string | null {
+  const normFrom = fromFile.replace(/\\/g, "/");
+  const normTo = toFile.replace(/\\/g, "/");
+  const fromRoot = moduleRoot(normFrom);
+  const toRoot = moduleRoot(normTo);
+  if (fromRoot !== null && toRoot !== null && fromRoot.toLowerCase() !== toRoot.toLowerCase()) {
+    return null;
+  }
+
+  const fromParts = normFrom.split("/").slice(0, -1);
+  const isJsTsTarget = /\.(tsx?|mts|cts|jsx?|mjs|cjs)$/i.test(normTo);
+  let strippedTo = normTo.replace(/\.(tsx?|mts|cts|jsx?|mjs|cjs|pyw?|rs|php|dart|rb)$/i, "");
+  if (isJsTsTarget) {
+    strippedTo = strippedTo.replace(/\/index$/i, "");
+  }
+  const toParts = strippedTo.split("/");
+
+  const isWin =
+    (/^[A-Za-z]:$/.test(fromParts[0] ?? "") && /^[A-Za-z]:$/.test(toParts[0] ?? "")) ||
+    (fromRoot !== null && toRoot !== null && fromRoot.startsWith("//") && toRoot.startsWith("//"));
   let common = 0;
-  while (common < fromParts.length && common < toParts.length && fromParts[common] === toParts[common]) {
+  while (
+    common < fromParts.length &&
+    common < toParts.length &&
+    (isWin
+      ? fromParts[common].toLowerCase() === toParts[common].toLowerCase()
+      : fromParts[common] === toParts[common])
+  ) {
     common++;
   }
   const up = fromParts.length - common;

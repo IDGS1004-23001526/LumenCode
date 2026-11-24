@@ -4,6 +4,7 @@ import { h } from "./dom";
 export type MenuEntry = { label: string; shortcut?: string; disabled?: boolean; run: () => unknown } | "separator";
 
 let current: HTMLElement | null = null;
+let attachTimer: ReturnType<typeof setTimeout> | null = null;
 
 function onOutside (e: PointerEvent) {
     if (current && !current.contains(e.target as Node)) hideContextMenu();
@@ -14,6 +15,10 @@ function onEsc(e: KeyboardEvent) {
 }
 
 export function hideContextMenu(immediate = false) {
+    if (attachTimer !== null) {
+        clearTimeout(attachTimer);
+        attachTimer = null;
+    }
     const closing = current;
     current = null;
     document.removeEventListener("pointerdown", onOutside);
@@ -50,12 +55,14 @@ export function showContextMenu(x: number, y: number, entries: MenuEntry[]) {
 
     document.body.append(menu);
     const { width, height } = menu.getBoundingClientRect();
-    menu.style.left = `${Math.min(x, innerWidth - width - 8)}px`;
-    menu.style.top = `${Math.min(y, innerHeight - height - 8)}px`;
+    menu.style.left = `${Math.max(8, Math.min(x, innerWidth - width - 8))}px`;
+    menu.style.top = `${Math.max(8, Math.min(y, innerHeight - height - 8))}px`;
     current = menu;
     animateContextMenuIn(menu);
 
-    setTimeout (() => {
+    attachTimer = setTimeout(() => {
+        attachTimer = null;
+        if (current !== menu) return;
         document.addEventListener("pointerdown", onOutside);
         document.addEventListener("keydown", onEsc);
     });

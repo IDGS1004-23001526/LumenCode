@@ -14,6 +14,8 @@ export interface FileSystemPort {
 
 export interface DialogPort {
   pickFolder(): Promise<string | null>;
+  pickFile(): Promise<string | null>;
+  saveFile(defaultPath?: string): Promise<string | null>;
   confirm(message: string, okLabel?: string): Promise<boolean>;
   error(message: string): Promise<void>;
   prompt(label: string, options?: { initialValue?: string; confirmLabel?: string }): Promise<string | null>;
@@ -28,9 +30,10 @@ export interface EditorPort {
   revealPosition(path: string, line: number, character: number): void;
   rename(oldPath: string, newPath: string): void;
   close(path: string): void;
+  isEditable(path: string): boolean;
   getText(path: string): string;
   setText(path: string, content: string): void;
-  configure(opts: { tabSize: number; wordWrap: boolean }): void;
+  configure(opts: { tabSize: number; wordWrap: boolean; dark?: boolean }): void;
   focus(): void;
   remeasure(): void;
 }

@@ -1,10 +1,9 @@
 import { Prec, StateEffect, StateField, type Extension, type Text } from "@codemirror/state";
 import type { Completion, CompletionContext, CompletionResult } from "@codemirror/autocomplete";
-import { Decoration, EditorView, hoverTooltip, keymap, type DecorationSet } from "@codemirror/view";
-import { joinPath, normalizePath, parentDirOf } from "../../domain/path";
+import { Decoration, EditorView, ViewPlugin, hoverTooltip, keymap, type DecorationSet } from "@codemirror/view";
+import { joinPath, normalizePath, parentDirOf, pathsEqual } from "../../domain/path";
 import type { ProjectIndex } from "../../domain/symbolIndex";
 import { lspClient, type LspCompletionItem, type LspLocation } from "../../infraestructure/lspClient";
-import { createSmartCompletionSource } from "./smartCompletion";
 
 const LSP_KIND_MAP: Record<number, string> = {
   1: "text",
@@ -71,6 +70,7 @@ function applyLspCompletionItem(
   view: EditorView,
   item: LspCompletionItem,
   activePath: string,
+  getActivePath: () => string | null,
   from: number,
   to: number,
 ) {
@@ -79,7 +79,10 @@ function applyLspCompletionItem(
     const rawInsert = resolved.textEdit?.newText ?? resolved.insertText ?? resolved.label;
     const text = stripLspSnippet(rawInsert);
     const mainFrom = resolved.textEdit ? lspPosToOffset(doc, resolved.textEdit.range.start) : from;
-    const mainTo = resolved.textEdit ? lspPosToOffset(doc, resolved.textEdit.range.end) : to;
+    // Bajo `validFor`, el usuario pudo seguir escribiendo tras recibir el item: cubre hasta `to`
+    const mainTo = resolved.textEdit
+      ? Math.max(to, lspPosToOffset(doc, resolved.textEdit.range.end))
+      : to;
 
     const edits: { from: number; to: number; insert: string }[] = [
       { from: mainFrom, to: mainTo, insert: text },
@@ -106,6 +109,7 @@ function applyLspCompletionItem(
   if (!item.additionalTextEdits?.length && item.data !== undefined) {
     execute(item);
     void lspClient.resolveCompletion(activePath, item).then((resolved) => {
+      if (getActivePath() !== activePath) return;
       if (!resolved?.additionalTextEdits?.length) return;
       const doc = view.state.doc;
       const curText = doc.toString();
@@ -130,12 +134,9 @@ function applyLspCompletionItem(
 }
 
 export function createLspCompletionSource(
-  getIndex: () => ProjectIndex,
+  _getIndex: () => ProjectIndex,
   getActivePath: () => string | null,
-  getAssetFiles?: () => Set<string>,
 ) {
-  const fallback = createSmartCompletionSource(getIndex, getActivePath, getAssetFiles);
-
   return async (ctx: CompletionContext): Promise<CompletionResult | null> => {
     const activePath = getActivePath();
     if (!activePath || !lspClient.hasActiveServerFor(activePath)) {
@@ -181,13 +182,15 @@ export function createLspCompletionSource(
         info: formatDoc(item.documentation),
         boost: item.additionalTextEdits?.length ? 75 : 40,
         apply: hasEdits
-          ? (view, _c, applyFrom, applyTo) => applyLspCompletionItem(view, item, activePath, applyFrom, applyTo)
+          ? (view, _c, applyFrom, applyTo) =>
+              applyLspCompletionItem(view, item, activePath, getActivePath, applyFrom, applyTo)
           : stripLspSnippet(item.insertText ?? item.label),
       };
     });
 
     if (options.length === 0) {
-      return fallback(ctx);
+      // `fastLocalSource` ya provee sugerencias locales/auto-imports/snippets; evita duplicarlas
+      return null;
     }
 
     return {
@@ -271,34 +274,47 @@ function resolveImportedModulePath(
   index: ProjectIndex,
 ): string | null {
   const esc = symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const importRegex = new RegExp(
-    `import\\s+(?:[^;\\n]*\\b${esc}\\b[^;\\n]*from\\s+|\\b${esc}\\b\\s+from\\s+)['"]([^'"]+)['"]`,
-  );
-  const m = importRegex.exec(docText);
-  if (!m) return null;
+  const symRe = new RegExp(`\\b${esc}\\b`);
+  const stmtRe = /import\s+(?:type\s+)?([\s\S]*?)\s+from\s+['"]([^'"]+)['"]/g;
 
-  const spec = m[1];
-  if (!spec.startsWith(".")) return null;
+  let spec: string | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = stmtRe.exec(docText)) !== null) {
+    if (symRe.test(m[1])) {
+      spec = m[2];
+      break;
+    }
+  }
+  if (!spec || !spec.startsWith(".")) return null;
 
-  const base = normalizePath(joinPath(parentDirOf(activePath), spec)).toLowerCase();
-  const exts = ["", ".ts", ".tsx", ".js", ".jsx", ".mjs", "/index.ts", "/index.tsx", "/index.js"];
+  const base = normalizePath(joinPath(parentDirOf(activePath), spec));
+  const candidates = [
+    base,
+    `${base}.ts`,
+    `${base}.tsx`,
+    `${base}.js`,
+    `${base}.jsx`,
+    `${base}.mjs`,
+    joinPath(base, "index.ts"),
+    joinPath(base, "index.tsx"),
+    joinPath(base, "index.js"),
+  ];
 
   for (const filePath of index.files.keys()) {
-    const norm = filePath.toLowerCase();
-    for (const ext of exts) {
-      if (norm === base + ext) return filePath;
+    for (const cand of candidates) {
+      if (pathsEqual(filePath, cand)) return filePath;
     }
   }
   return null;
 }
 
 async function findFallbackDefinition(
-  view: EditorView,
+  docText: string,
+  curLine: number,
   pos: number,
   activePath: string,
   deps: DefinitionDeps,
 ): Promise<LspLocation | null> {
-  const docText = view.state.doc.toString();
   const word = wordAt(docText, pos);
   if (!word) return null;
 
@@ -318,16 +334,13 @@ async function findFallbackDefinition(
 
   // 2. Buscar declaración en el archivo actual (si no es la misma línea de uso o es distinta posición)
   const localDecl = findDeclarationInText(docText, word.text);
-  if (localDecl) {
-    const curLine = view.state.doc.lineAt(pos).number - 1;
-    if (localDecl.line !== curLine) {
-      return { path: activePath, line: localDecl.line, character: localDecl.character };
-    }
+  if (localDecl && localDecl.line !== curLine) {
+    return { path: activePath, line: localDecl.line, character: localDecl.character };
   }
 
   // 3. Buscar símbolo exportado en el índice del proyecto
   for (const [filePath, symbols] of index.files.entries()) {
-    if (filePath === activePath) continue;
+    if (pathsEqual(filePath, activePath)) continue;
     if (!symbols.some((s) => s.name === word.text)) continue;
     try {
       const content = await deps.readText(filePath);
@@ -364,17 +377,21 @@ export function createLspDefinitionExtension(deps: DefinitionDeps): Extension {
     const activePath = deps.getActivePath();
     if (!activePath) return;
 
-    const lineObj = view.state.doc.lineAt(pos);
+    const docSnapshot = view.state.doc.toString();
+    const safePos = Math.max(0, Math.min(docSnapshot.length, pos));
+    const lineObj = view.state.doc.lineAt(safePos);
     const line = lineObj.number - 1;
-    const character = pos - lineObj.from;
+    const character = safePos - lineObj.from;
 
     const lspLoc = await lspClient.definition(activePath, line, character);
+    if (deps.getActivePath() !== activePath) return;
     if (lspLoc) {
       deps.onNavigate(lspLoc.path, lspLoc.line, lspLoc.character);
       return;
     }
 
-    const fallbackLoc = await findFallbackDefinition(view, pos, activePath, deps);
+    const fallbackLoc = await findFallbackDefinition(docSnapshot, line, safePos, activePath, deps);
+    if (deps.getActivePath() !== activePath) return;
     if (fallbackLoc) {
       deps.onNavigate(fallbackLoc.path, fallbackLoc.line, fallbackLoc.character);
     }
@@ -404,8 +421,29 @@ export function createLspDefinitionExtension(deps: DefinitionDeps): Extension {
     setHoveredRange(view, word ? { from: word.from, to: word.to } : null);
   };
 
+  const windowCleanupPlugin = ViewPlugin.fromClass(
+    class {
+      private onWinKeyUp = (e: KeyboardEvent) => {
+        if (e.key === "Control" || e.key === "Meta") refreshHoverLink(this.view, false);
+      };
+      private onWinBlur = () => {
+        lastMouse = null;
+        refreshHoverLink(this.view, false);
+      };
+      constructor(private readonly view: EditorView) {
+        window.addEventListener("keyup", this.onWinKeyUp);
+        window.addEventListener("blur", this.onWinBlur);
+      }
+      destroy() {
+        window.removeEventListener("keyup", this.onWinKeyUp);
+        window.removeEventListener("blur", this.onWinBlur);
+      }
+    },
+  );
+
   return [
     hoverLinkField,
+    windowCleanupPlugin,
     Prec.highest(
       keymap.of([
         {

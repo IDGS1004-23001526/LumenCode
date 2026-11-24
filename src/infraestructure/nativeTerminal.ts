@@ -33,6 +33,7 @@ export class NativeTerminal implements TerminalPort {
     os: "windows" | "macos" | "linux";
     shell: string;
     private listener?: (line: string, isErr: boolean) => void;
+    private cwdVersion = 0;
 
     constructor() {
         this.os = guessOn();
@@ -45,13 +46,17 @@ export class NativeTerminal implements TerminalPort {
     }
 
     async init(): Promise<void> {
+        const ver = this.cwdVersion;
         const info = await invoke<RustTerminalInfo>("terminal_init");
         this.os = info.os;
         this.shell = info.shell;
-        this.cwd = info.cwd;
+        if (ver === this.cwdVersion) {
+            this.cwd = info.cwd;
+        }
     }
 
     setCwd(path: string): void {
+        this.cwdVersion += 1;
         this.cwd = path;
     }
 
@@ -72,12 +77,15 @@ export class NativeTerminal implements TerminalPort {
 
     async run(line: string): Promise<TerminalResult> {
         if (!line.trim()) return { stdout: [], stderr: [], code: 0 };
+        const ver = this.cwdVersion;
         const res = await invoke<RustTerminalOutput>("terminal_exec", {
             cwd: this.cwd,
             line,
         });
 
-        this.cwd = res.cwd;
+        if (ver === this.cwdVersion) {
+            this.cwd = res.cwd;
+        }
 
         return {
             stdout: res.stdout,

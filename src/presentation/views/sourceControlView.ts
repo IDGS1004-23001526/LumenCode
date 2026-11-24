@@ -55,12 +55,17 @@ export function mountSourceControl(
   });
 
   async function loadExtras(root: string) {
+    let nextStashes = stashes;
+    let nextCommits = commits;
     if (stashOpen) {
-      stashes = await gitClient.stashList(root).catch(() => []);
+      nextStashes = await gitClient.stashList(root).catch(() => []);
     }
     if (historyOpen) {
-      commits = await gitClient.log(root, undefined, 25).catch(() => []);
+      nextCommits = await gitClient.log(root, undefined, 25).catch(() => []);
     }
+    if (store.getState().git?.root !== root) return;
+    stashes = nextStashes;
+    commits = nextCommits;
     render(store.getState());
   }
 
@@ -145,7 +150,14 @@ export function mountSourceControl(
       h("button", { class: "sc-head-btn", title: "Fetch", onclick: () => void uc.gitRemoteOp("fetch") }, "⟳"),
       h("button", { class: "sc-head-btn", title: "Pull", onclick: () => void uc.gitRemoteOp("pull") }, "↓"),
       h("button", { class: "sc-head-btn", title: "Pull (Rebase)", onclick: () => void uc.gitRemoteOp("pull-rebase") }, "⇣"),
-      h("button", { class: "sc-head-btn", title: g.upstream ? "Push" : "Publicar rama", onclick: () => void uc.gitRemoteOp(g.upstream ? "push" : "publish") }, "↑"),
+      h("button", {
+        class: "sc-head-btn",
+        disabled: g.detached && !g.upstream,
+        title: g.detached && !g.upstream
+          ? "HEAD desacoplado: cambia o crea una rama para publicar"
+          : g.upstream ? "Push" : "Publicar rama",
+        onclick: () => void uc.gitRemoteOp(g.upstream ? "push" : "publish"),
+      }, "↑"),
       h("button", { class: "sc-head-btn", title: "Undo Last Commit (HEAD~1)", onclick: () => void uc.gitUndoLastCommit() }, "↶"),
     );
 
@@ -373,6 +385,7 @@ export function mountSourceControl(
                           expandedCommits.delete(c.hash);
                         } else {
                           const list = await gitClient.commitFiles(g.root, c.hash).catch(() => []);
+                          if (store.getState().git?.root !== g.root) return;
                           expandedCommits.set(c.hash, list);
                         }
                         render(store.getState());
@@ -401,11 +414,39 @@ export function mountSourceControl(
       ),
     );
 
+    const activeEl = document.activeElement;
+    const focusedSelector =
+      activeEl instanceof HTMLTextAreaElement && activeEl.classList.contains("sc-commit-input")
+        ? ".sc-commit-input"
+        : activeEl instanceof HTMLInputElement && activeEl.classList.contains("sc-stash-input")
+          ? ".sc-stash-input"
+          : null;
+    const selStart = focusedSelector && (activeEl as HTMLInputElement | HTMLTextAreaElement).selectionStart;
+    const selEnd = focusedSelector && (activeEl as HTMLInputElement | HTMLTextAreaElement).selectionEnd;
+
     bodyEl.replaceChildren(...nodes);
+
+    if (focusedSelector) {
+      const nextInput = bodyEl.querySelector<HTMLInputElement | HTMLTextAreaElement>(focusedSelector);
+      if (nextInput) {
+        nextInput.focus({ preventScroll: true });
+        if (typeof selStart === "number" && typeof selEnd === "number") {
+          nextInput.setSelectionRange(selStart, selEnd);
+        }
+      }
+    }
   }
 
   render(store.getState());
   store.subscribe((s, p) => {
+    if (s.rootPath !== p.rootPath) {
+      commitMessage = "";
+      amend = false;
+      stashMessage = "";
+      stashes = [];
+      commits = [];
+      expandedCommits.clear();
+    }
     if (s.gitOpen !== p.gitOpen) {
       const anchor = getAnchor();
       if (s.gitOpen) {

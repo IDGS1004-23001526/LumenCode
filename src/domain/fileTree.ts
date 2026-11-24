@@ -3,7 +3,7 @@ import type { FileNode } from "./types";
 /** Carpetas primero, luego orden alfabetico sin distinguir mayusculas, este será nuestro objetivo, vale ? */
 export function sortNodes(nodes: FileNode[]): FileNode[] {
     return [...nodes].sort((a, b) =>
-        a.isDir === b.isDir ? a.name.localeCompare(a.name, undefined, { sensitivity: "base" }) : a.isDir ? -1 : 1,
+        a.isDir === b.isDir ? a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) : a.isDir ? -1 : 1,
     );
 }
 

@@ -457,7 +457,7 @@ kbd { font: 11px var(--editor-font); color: var(--fg-muted); }
   border: 1px solid var(--border);
   border-radius: 10px;
   overflow: hidden;
-  font-family: var(--font-mono, monospace);
+  font-family: var(--editor-font, monospace);
   font-size: 12px;
 }
 .ext-preview-sidebar {

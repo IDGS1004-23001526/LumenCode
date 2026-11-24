@@ -1,4 +1,4 @@
-import { ask, message, open } from "@tauri-apps/plugin-dialog";
+import { ask, message, open, save } from "@tauri-apps/plugin-dialog";
 import type { DialogPort } from "../application/ports";
 
 /** Todo menos prompt que lo pone la capa de presentacion osea que Tauri no tiene prompt */
@@ -6,6 +6,14 @@ export function createTauriDialogs(): Omit<DialogPort, "prompt" | "withBusy"> {
     return {
         async pickFolder() {
             const r = await open({ directory: true, multiple: false, recursive: true });
+            return typeof r === "string" ? r : null;
+        },
+        async pickFile() {
+            const r = await open({ directory: false, multiple: false });
+            return typeof r === "string" ? r : null;
+        },
+        async saveFile(defaultPath) {
+            const r = await save({ title: "Guardar como", defaultPath });
             return typeof r === "string" ? r : null;
         },
         confirm: (msg, okLabel = "Descartar") =>

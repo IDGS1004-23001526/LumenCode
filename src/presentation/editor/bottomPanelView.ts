@@ -4,6 +4,7 @@ import type { TerminalPort } from "../../application/ports";
 import { animateCaelestiaIn, animateLayoutWithPanel } from "../animate";
 import { cx, h } from "../dom";
 import type { LumenDiagnostic } from "./errorLens";
+import { lspClient } from "../../infraestructure/lspClient";
 
 const VIEWS: { id: PanelView; label: string } [] = [
     { id: "problems", label: "Problems" },
@@ -53,12 +54,11 @@ function ansi256ToCss(n: number, isBg = false): string {
 /** Convierte secuencias ANSI (\x1b[...m) de 16, 256 y TrueColor RGB en spans con estilo. */
 function renderAnsi(raw: string): DocumentFragment {
     const frag = document.createDocumentFragment();
-    // Limpia códigos de control de cursor/pantalla (NOTA: sin 'm' para no borrar los colores)
+    // Limpia códigos de control de cursor/pantalla/modos privados (sin 'm' para preservar colores)
     const cleaned = raw
         .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "") // secuencias OSC
-        .replace(/\x1b\[[0-9;?]*[A-HJKSTfisu]/g, "");      // movimiento de cursor
-    // Acepta tanto \x1b[32m como corchetes huérfanos [32m si algún proceso omitió ESC
-    const regex = /(?:\x1b\[|\[)([0-9;]*)m/g;
+        .replace(/\x1b\[[0-9;?]*[A-HJKSTfhisul]/g, "");    // movimiento de cursor y modos ?25l/?25h
+    const regex = /\x1b\[([0-9;]*)m/g;
     let fg: string | null = null;
     let bg: string | null = null;
     let bold = false;
@@ -125,7 +125,14 @@ function createTerminalView(term: TerminalPort, onCommandDone?: (cmd: string) =>
     const promptEl = h("span", { class: "term-prompt" });
     const input = h("input", { class: "term-input", spellcheck: "false", autocomplete: "off", "aria-label": "Terminal" }) as HTMLInputElement;
 
-    const root = h("div", { class: "panel-view terminal", onclick: () => input.focus() },
+    const root = h("div", {
+        class: "panel-view terminal",
+        onclick: () => {
+            const sel = window.getSelection();
+            if (sel && sel.toString().length > 0) return;
+            input.focus();
+        },
+    },
         out, h("div", { class: "term-line" }, h("span", { class: "term-dot" }, "•"), promptEl, input)
     );
 
@@ -319,6 +326,24 @@ export function mountBottomPanel(
         updateDiagnostics(path: string, diags: LumenDiagnostic[]) {
             if (diags.length === 0) problemsByFile.delete(path);
             else problemsByFile.set(path, diags);
+            renderProblems();
+        },
+        replaceWorkspaceDiagnostics(diagsByFile: Map<string, LumenDiagnostic[]>) {
+            const preservedLsp = new Map<string, LumenDiagnostic[]>();
+            for (const [path, diags] of problemsByFile) {
+                if (lspClient.hasActiveServerFor(path)) {
+                    preservedLsp.set(path, diags);
+                }
+            }
+            problemsByFile.clear();
+            for (const [path, diags] of diagsByFile) {
+                if (diags.length > 0 && !preservedLsp.has(path)) {
+                    problemsByFile.set(path, diags);
+                }
+            }
+            for (const [path, diags] of preservedLsp) {
+                if (diags.length > 0) problemsByFile.set(path, diags);
+            }
             renderProblems();
         },
     };

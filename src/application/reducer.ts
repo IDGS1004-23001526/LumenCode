@@ -49,6 +49,7 @@ export function reducer(s: AppState, a: Action): AppState {
         rootPath: a.root,
         tree: a.tree,
         expanded: s.rootPath === a.root ? s.expanded : new Set([a.root]),
+        git: s.rootPath === a.root ? s.git : null,
       };
     case "tree/children":
       return { ...s, tree: setChildren(s.tree, a.path, a.children) };

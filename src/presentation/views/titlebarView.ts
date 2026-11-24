@@ -46,11 +46,6 @@ export function mountTitlebar(el: HTMLElement, store: AppStore) {
     mkBtn(WIN_ICONS.close, "Cerrar", "close", () => void appWin.close()),
   );
 
-  el.addEventListener("dblclick", (e) => {
-    if ((e.target as HTMLElement).closest(".titlebar-controls")) return;
-    void appWin.toggleMaximize();
-  });
-
   if (isMac) {
     el.replaceChildren(left);
   } else {

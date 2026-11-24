@@ -43,6 +43,17 @@ export function shouldAnimate(): boolean {
   return !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
+const caelestiaOrigins = new WeakMap<HTMLElement, HTMLElement>();
+
+function captureOriginFlipState(origin: HTMLElement, flipId: string) {
+  const prev = origin.dataset.flipId;
+  origin.dataset.flipId = flipId;
+  const state = Flip.getState(origin);
+  if (prev !== undefined) origin.dataset.flipId = prev;
+  else delete origin.dataset.flipId;
+  return state;
+}
+
 export function openPrettyModal(dialog: HTMLDialogElement, explicitOrigin?: HTMLElement | null): void {
   if (!shouldAnimate()) {
     dialog.showModal();
@@ -70,8 +81,8 @@ export function openPrettyModal(dialog: HTMLDialogElement, explicitOrigin?: HTML
   if (origin) {
     const flipId = Math.random().toString(16).slice(2);
     dialog.dataset.flipId = flipId;
-    origin.dataset.flipId = flipId;
-    const originState = Flip.getState(origin);
+    caelestiaOrigins.set(dialog, origin);
+    const originState = captureOriginFlipState(origin, flipId);
     dialog.showModal();
     Flip.from(originState, {
       targets: dialog,
@@ -119,13 +130,12 @@ export function closePrettyModal(dialog: HTMLDialogElement, onClosed?: () => voi
   }
 
   gsap.killTweensOf(dialog);
+  dialog.classList.remove("pretty-modal-opening");
   const flipId = dialog.dataset.flipId;
-  const origin = flipId
-    ? (document.querySelector(`[data-flip-id="${flipId}"]:not([open])`) as HTMLElement | null)
-    : null;
+  const origin = caelestiaOrigins.get(dialog) ?? null;
 
-  if (origin && origin.isConnected && origin.getBoundingClientRect().width > 0) {
-    const originState = Flip.getState(origin);
+  if (origin && flipId && origin.isConnected && origin.getBoundingClientRect().width > 0) {
+    const originState = captureOriginFlipState(origin, flipId);
     Flip.to(originState, {
       targets: dialog,
       scale: true,
@@ -195,8 +205,8 @@ export function animateCaelestiaIn(el: HTMLElement): number {
   if (origin) {
     const flipId = Math.random().toString(16).slice(2);
     el.dataset.flipId = flipId;
-    origin.dataset.flipId = flipId;
-    const originState = Flip.getState(origin);
+    caelestiaOrigins.set(el, origin);
+    const originState = captureOriginFlipState(origin, flipId);
     Flip.from(originState, {
       targets: el,
       scale: true,
@@ -243,16 +253,15 @@ export function animateCaelestiaOut(el: HTMLElement, onDone: () => void): number
   }
 
   gsap.killTweensOf(el);
+  el.classList.remove("pretty-modal-opening");
   const flipId = el.dataset.flipId;
-  const origin = flipId
-    ? (document.querySelector(`[data-flip-id="${flipId}"]`) as HTMLElement | null)
-    : null;
+  const origin = caelestiaOrigins.get(el) ?? null;
   const validOrigin = origin && origin !== el && !el.contains(origin) && origin.isConnected && origin.getBoundingClientRect().width > 0
     ? origin
     : null;
 
-  if (validOrigin) {
-    const originState = Flip.getState(validOrigin);
+  if (validOrigin && flipId) {
+    const originState = captureOriginFlipState(validOrigin, flipId);
     Flip.to(originState, {
       targets: el,
       scale: true,
@@ -555,6 +564,12 @@ export function animateEditorContentOut(el: HTMLElement): void {
   ghost.style.height = "100%";
   wrapper.append(ghost);
   document.body.append(wrapper);
+  const origScroller = el.querySelector(".cm-scroller") as HTMLElement | null;
+  const ghostScroller = ghost.querySelector(".cm-scroller") as HTMLElement | null;
+  if (origScroller && ghostScroller) {
+    ghostScroller.scrollTop = origScroller.scrollTop;
+    ghostScroller.scrollLeft = origScroller.scrollLeft;
+  }
   gsap.to(wrapper, {
     opacity: 0,
     scale: 0.94,
@@ -567,6 +582,7 @@ export function animateEditorContentOut(el: HTMLElement): void {
 export function animateGitPopoverIn(el: HTMLElement, anchor: HTMLElement | null): void {
   if (!shouldAnimate()) return;
   gsap.killTweensOf(el);
+  gsap.set(el, { clearProps: "transform,opacity,borderRadius,filter,transformOrigin" });
   const elRect = el.getBoundingClientRect();
   const anchorRect = anchor?.getBoundingClientRect();
   const originX = anchorRect

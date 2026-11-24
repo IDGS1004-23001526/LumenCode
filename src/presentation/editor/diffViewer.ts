@@ -3,7 +3,7 @@ import { gitClient } from "../../infraestructure/gitClient";
 import { h } from "../dom";
 
 export interface DiffHostCallbacks {
-  onMutated: (repoRoot: string, relPath: string) => Promise<void>;
+  onMutated: (repoRoot: string, relPath: string, touchedDisk: boolean) => Promise<void>;
   confirmRevert: (message: string, okLabel?: string) => Promise<boolean>;
   onError: (message: string) => Promise<void>;
 }
@@ -23,18 +23,22 @@ export function createDiffPreviewHost(parent: HTMLElement, cb: DiffHostCallbacks
   let activeDiff: DiffPayload | null = null;
 
   async function runHunkPatch(hunk: DiffHunk, cached: boolean, reverse: boolean) {
-    if (!activeDiff) return;
+    const target = activeDiff;
+    if (!target) return;
     if (reverse && !cached) {
       const ok = await cb.confirmRevert(
-        `¿Revertir este bloque en "${activeDiff.relPath}"?`,
+        `¿Revertir este bloque en "${target.relPath}"?`,
         "Revertir",
       );
       if (!ok) return;
     }
     try {
-      const patch = buildHunkPatch(activeDiff.relPath, hunk);
-      await gitClient.applyPatch(activeDiff.repoRoot, patch, cached, reverse);
-      await cb.onMutated(activeDiff.repoRoot, activeDiff.relPath);
+      const patch = buildHunkPatch(target.relPath, hunk, {
+        isNewFile: target.leftText.length === 0,
+        isDeletedFile: target.rightText.length === 0,
+      });
+      await gitClient.applyPatch(target.repoRoot, patch, cached, reverse);
+      await cb.onMutated(target.repoRoot, target.relPath, !cached);
     } catch (e) {
       await cb.onError(`No se pudo aplicar el cambio del bloque.\n\n${String(e)}`);
     }

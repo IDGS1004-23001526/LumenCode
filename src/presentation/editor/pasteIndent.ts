@@ -33,33 +33,40 @@ function reindentRelativeBlock(
   startLineNum: number,
   endLineNum: number,
   pasteStartsAtLineIndent: boolean,
+  insertedText: string,
+  prefixCols: number,
 ): EditorState {
   const tabSize = postState.tabSize;
   const firstLine = postState.doc.line(startLineNum);
   const firstLineWs = leadingWhitespace(firstLine.text);
+  const rawPastedLines = insertedText.split("\n");
 
-  let targetCols = countColumns(firstLineWs, tabSize);
-  if (pasteStartsAtLineIndent) {
+  let targetCols = pasteStartsAtLineIndent ? prefixCols : countColumns(firstLineWs, tabSize);
+  if (pasteStartsAtLineIndent && prefixCols === 0) {
     const expected = getIndentation(postState, firstLine.from);
     if (expected !== null && expected >= 0) {
       targetCols = expected;
     }
   }
 
-  const firstContentLine = pasteStartsAtLineIndent ? startLineNum : startLineNum + 1;
+  const startOffset = pasteStartsAtLineIndent ? 0 : 1;
+  const origColsByOffset = new Map<number, number>();
   let minCols = Infinity;
 
-  for (let i = firstContentLine; i <= endLineNum; i++) {
-    const line = postState.doc.line(i);
-    if (!line.text.trim()) continue;
-    const cols = countColumns(leadingWhitespace(line.text), tabSize);
+  for (let k = startOffset; k < rawPastedLines.length; k++) {
+    const rawLine = rawPastedLines[k];
+    if (!rawLine.trim()) continue;
+    const cols = countColumns(leadingWhitespace(rawLine), tabSize);
+    origColsByOffset.set(k, cols);
     if (cols < minCols) minCols = cols;
   }
 
   if (!Number.isFinite(minCols)) return postState;
 
   let work = postState;
+  const firstContentLine = pasteStartsAtLineIndent ? startLineNum : startLineNum + 1;
   for (let i = firstContentLine; i <= endLineNum; i++) {
+    const k = i - startLineNum;
     const line = work.doc.line(i);
     const currentWs = leadingWhitespace(line.text);
     if (!line.text.trim()) {
@@ -71,8 +78,8 @@ function reindentRelativeBlock(
       continue;
     }
 
-    const lineCols = countColumns(currentWs, tabSize);
-    const desiredCols = Math.max(0, targetCols + (lineCols - minCols));
+    const origCols = origColsByOffset.get(k) ?? countColumns(currentWs, tabSize);
+    const desiredCols = Math.max(0, targetCols + (origCols - minCols));
     const desiredWs = indentString(work, desiredCols);
     if (currentWs !== desiredWs) {
       work = work.update({
@@ -159,9 +166,12 @@ export function createPasteIndentExtension(getActivePath: () => string | null): 
     const postState = tr.state;
     const startLineNum = postState.doc.lineAt(pasteFromB).number;
     const endLineNum = postState.doc.lineAt(pasteToB).number;
+    // Evita bloquear el hilo principal al pegar bloques masivos (> 300 líneas)
+    if (endLineNum - startLineNum > 300) return tr;
+    const prefixCols = countColumns(prefixBeforeCursor, tr.startState.tabSize);
 
     const workState = isIndentSensitivePath(getActivePath())
-      ? reindentRelativeBlock(postState, startLineNum, endLineNum, pasteStartsAtLineIndent)
+      ? reindentRelativeBlock(postState, startLineNum, endLineNum, pasteStartsAtLineIndent, insertedText, prefixCols)
       : reindentSyntaxBlock(postState, startLineNum, endLineNum, pasteStartsAtLineIndent);
 
     const origReplaceFrom = startLine.from;
@@ -178,11 +188,16 @@ export function createPasteIndentExtension(getActivePath: () => string | null): 
 
     if (formattedBlock === postBlock) return tr;
 
-    // Ubica el cursor al final del contenido pegado (antes del sufijo de la última línea)
-    const trailingSuffixLen = origEndLine.to - pasteToA;
+    // Ubica el cursor al final del contenido pegado sin desplazarse si el sufijo en blanco fue recortado
+    const trailingSuffix = origEndLine.text.slice(pasteToA - origEndLine.from);
+    let effectiveTrailingLen = 0;
+    if (trailingSuffix.trim().length > 0) {
+      const idx = newEndLine.text.lastIndexOf(trailingSuffix);
+      effectiveTrailingLen = idx !== -1 ? newEndLine.text.length - idx : 0;
+    }
     const newCursorPos = Math.max(
       origReplaceFrom,
-      origReplaceFrom + formattedBlock.length - trailingSuffixLen,
+      origReplaceFrom + formattedBlock.length - effectiveTrailingLen,
     );
 
     return {

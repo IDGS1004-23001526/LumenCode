@@ -43,7 +43,8 @@ export function mountExplorer(el: HTMLElement, store: AppStore, uc: UseCases) {
             { label: `Nuevo archivo${folderLabel}`, disabled: noRoot, run: () => uc.createEntry("file", dir) },
             { label: `Nueva carpeta${folderLabel}`, disabled: noRoot, run: () => uc.createEntry("folder", dir) },
             "separator",
-            { label: "Abrir carpeta...", shortcut: "Ctrl+O", run: uc.openFolder },
+            { label: "Abrir archivo...", shortcut: "Ctrl+O", run: uc.openFileDialog },
+            { label: "Abrir carpeta...", shortcut: "Ctrl+Shift+O", run: uc.openFolder },
             { label: "Actualizar", disabled: noRoot, run: uc.refresh },
             { label: "Colapsar todo", disabled: noRoot, run: uc.collapseAll },
         ]);
@@ -57,6 +58,7 @@ export function mountExplorer(el: HTMLElement, store: AppStore, uc: UseCases) {
     // Clic derecho en cualquier zona libre del panel lateral
     el.addEventListener("contextmenu", (e) => {
         e.preventDefault();
+        e.stopPropagation();
         openMenuAt(e.clientX, e.clientY);
     });
 
@@ -65,21 +67,34 @@ export function mountExplorer(el: HTMLElement, store: AppStore, uc: UseCases) {
         treeEl,
     );
 
+    function findNodeByPath(nodes: FileNode[], path: string): FileNode | null {
+        for (const n of nodes) {
+            if (n.path === path) return n;
+            if (n.children) {
+                const found = findNodeByPath(n.children, path);
+                if (found) return found;
+            }
+        }
+        return null;
+    }
+
     function buildGitMaps(s: AppState) {
         const fileMap = new Map<string, GitFileStatus>();
         const dirtyDirs = new Set<string>();
         const g = s.git;
+        const isWin = Boolean(g?.root && /^[A-Za-z]:/.test(g.root));
+        const normKey = (rel: string) => (isWin ? rel.toLowerCase() : rel);
         if (g?.is_repo && g.root) {
             for (const e of g.entries) {
                 const rel = e.path.replace(/\\/g, "/");
-                fileMap.set(rel.toLowerCase(), e);
+                fileMap.set(normKey(rel), e);
                 const parts = rel.split("/");
                 for (let i = 1; i < parts.length; i++) {
-                    dirtyDirs.add(parts.slice(0, i).join("/").toLowerCase());
+                    dirtyDirs.add(normKey(parts.slice(0, i).join("/")));
                 }
             }
         }
-        return { repoRoot: g?.root ?? null, fileMap, dirtyDirs };
+        return { repoRoot: g?.root ?? null, isWin, fileMap, dirtyDirs };
     }
 
     function renderNode(
@@ -99,7 +114,8 @@ export function mountExplorer(el: HTMLElement, store: AppStore, uc: UseCases) {
         const icon = h("span", { class: "node-icon" });
         icon.innerHTML = node.isDir ? iconForFolder(node.name, open, iconTheme) : iconForFile(node.name, iconTheme);
 
-        const rel = gitMaps.repoRoot ? toRelativeRepoPath(gitMaps.repoRoot, node.path)?.toLowerCase() ?? null : null;
+        const rawRel = gitMaps.repoRoot ? toRelativeRepoPath(gitMaps.repoRoot, node.path) : null;
+        const rel = rawRel ? (gitMaps.isWin ? rawRel.toLowerCase() : rawRel) : null;
         const gitEntry = !node.isDir && rel ? gitMaps.fileMap.get(rel) : undefined;
         const dirDirty = node.isDir && !isRoot && rel ? gitMaps.dirtyDirs.has(rel) : false;
 
@@ -187,6 +203,12 @@ export function mountExplorer(el: HTMLElement, store: AppStore, uc: UseCases) {
             const stayingPrevIds = new Set(
                 prevRows.filter((el) => !outgoingSet.has(el)).map((el) => el.dataset.flipId ?? ""),
             );
+
+            if (s.rootPath !== p.rootPath) {
+                selectedNode = null;
+            } else if (selectedNode && s.tree !== p.tree) {
+                selectedNode = findNodeByPath(s.tree, selectedNode.path);
+            }
 
             if (outgoing.length > 0) animateCaelestiaItemsOut(outgoing);
 

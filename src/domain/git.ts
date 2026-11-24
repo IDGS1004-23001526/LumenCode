@@ -272,11 +272,17 @@ export function computeSideBySideRows(originalText: string, modifiedText: string
   return { rows, hunks };
 }
 
-export function buildHunkPatch(relPath: string, hunk: DiffHunk): string {
+export function buildHunkPatch(
+  relPath: string,
+  hunk: DiffHunk,
+  opts?: { isNewFile?: boolean; isDeletedFile?: boolean },
+): string {
   const cleanPath = relPath.replace(/\\/g, "/");
+  const isNewFile = Boolean(opts?.isNewFile && hunk.oldStart === 0 && hunk.oldCount === 0);
+  const isDeletedFile = Boolean(opts?.isDeletedFile && hunk.newStart === 0 && hunk.newCount === 0);
   const lines = [
-    `--- a/${cleanPath}`,
-    `+++ b/${cleanPath}`,
+    isNewFile ? "--- /dev/null" : `--- a/${cleanPath}`,
+    isDeletedFile ? "+++ /dev/null" : `+++ b/${cleanPath}`,
     `@@ -${hunk.oldStart},${hunk.oldCount} +${hunk.newStart},${hunk.newCount} @@`,
     ...hunk.oldLines.map((l) => `-${l}`),
     ...hunk.newLines.map((l) => `+${l}`),

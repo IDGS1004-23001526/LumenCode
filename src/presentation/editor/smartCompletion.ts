@@ -1,5 +1,8 @@
 import type { Completion, CompletionContext, CompletionResult } from "@codemirror/autocomplete";
+import { cssLanguage } from "@codemirror/lang-css";
 import { htmlLanguage } from "@codemirror/lang-html";
+import { snippets as jsSnippets, typescriptSnippets as tsSnippets } from "@codemirror/lang-javascript";
+import { xmlLanguage } from "@codemirror/lang-xml";
 import type { EditorView } from "@codemirror/view";
 import { fileNameOf } from "../../domain/path";
 import {
@@ -348,8 +351,17 @@ export function createSmartCompletionSource(
       if (!activePath) return null;
 
       const ext = activePath.split(".").pop()?.toLowerCase() ?? "";
-      const isHtmlDoc = ["html", "htm", "astro", "vue", "svelte", "xml", "svg"].includes(ext);
-      if (isHtmlDoc && htmlLanguage.isActiveAt(ctx.state, ctx.pos, -1)) return null;
+      if (ext === "xml" || ext === "svg") return null;
+
+      const isHtmlDoc = ["html", "htm", "astro", "vue", "svelte"].includes(ext);
+      if (
+        isHtmlDoc &&
+        (htmlLanguage.isActiveAt(ctx.state, ctx.pos, -1) ||
+          cssLanguage.isActiveAt(ctx.state, ctx.pos, -1) ||
+          xmlLanguage.isActiveAt(ctx.state, ctx.pos, -1))
+      ) {
+        return null;
+      }
 
       // En hojas de estilo y datos estructurados dejamos actuar al completado nativo de CodeMirror/LSP
       if (["css", "scss", "less", "json", "jsonc", "md", "markdown", "yaml", "yml", "toml"].includes(ext)) {
@@ -379,6 +391,7 @@ export function createSmartCompletionSource(
         for (const [filePath, symbols] of index.files.entries()) {
           if (filePath === activePath) continue;
           const relPath = relativeModulePath(activePath, filePath);
+          if (!relPath) continue;
           const exportedNames = symbols.map((s) => s.name).slice(0, 5).join(", ");
           options.push({
             label: relPath,
@@ -391,6 +404,7 @@ export function createSmartCompletionSource(
         if (getAssetFiles) {
           for (const assetPath of getAssetFiles()) {
             const relAsset = relativeModulePath(activePath, assetPath);
+            if (!relAsset) continue;
             options.push({
               label: relAsset,
               type: "file",
@@ -459,6 +473,7 @@ export function createSmartCompletionSource(
       for (const [filePath, symbols] of index.files.entries()) {
         if (filePath === activePath) continue;
         const relPath = relativeModulePath(activePath, filePath);
+        if (!relPath) continue;
         const matchesLineModule = activeImportSpec !== null && (
           relPath === activeImportSpec ||
           relPath.replace(/^\.\//, "") === activeImportSpec.replace(/^\.\//, "") ||
@@ -577,6 +592,15 @@ export function createSmartCompletionSource(
           });
         }
 
+        // Snippets nativos de JS/TS (`for`, `try/catch`, `class`, `function`, `interface`, etc.)
+        if (JS_LIKE_EXTS.has(ext)) {
+          const isTs = ext === "ts" || ext === "tsx" || ext === "mts" || ext === "cts";
+          const nativeSnippets = isTs ? tsSnippets : jsSnippets;
+          for (const sn of nativeSnippets) {
+            options.push({ ...sn, boost: 10 });
+          }
+        }
+
         for (const kw of profile?.keywords ?? []) {
           if (seen.has(kw)) continue;
           options.push({ label: kw, type: "keyword", boost: 5 });
@@ -608,14 +632,20 @@ function extractLineModuleSpec(lineText: string): string | null {
 
 function collectImportedModules(cleanDoc: string): Set<string> {
   const imported = new Set<string>();
-  const importLineRegex = /^\s*import\s+([^;\n]+?)\s+from\s+['"][^'"]+['"]/gm;
+  const importStmtRegex = /^\s*import\s+([^;]+?)\s+from\s+['"][^'"]+['"]/gm;
+  const inlineTypeSpecifier = /\btype\s+[A-Za-z_$][\w$]*(?:\s+as\s+[A-Za-z_$][\w$]*)?/g;
   let m: RegExpExecArray | null;
-  while ((m = importLineRegex.exec(cleanDoc)) !== null) {
-    for (const id of m[1].match(/[A-Za-z_$][\w$]*/g) ?? []) {
+  while ((m = importStmtRegex.exec(cleanDoc)) !== null) {
+    const clause = m[1].trim();
+    // `import type ...` no cuenta como import de valor (TS1361).
+    if (/^type\b/.test(clause)) continue;
+    // Descarta especificadores `type Foo` / `type Foo as Bar` dentro de llaves.
+    const valueClause = clause.replace(inlineTypeSpecifier, " ");
+    for (const id of valueClause.match(/[A-Za-z_$][\w$]*/g) ?? []) {
       if (id !== "type" && id !== "as") imported.add(id);
     }
   }
-  const pyFromRegex = /^\s*from\s+[.\w]+\s+import\s+([^\n]+)/gm;
+  const pyFromRegex = /^\s*from\s+[.\w]+\s+import\s+(\([^)]*\)|[^\n]+)/gm;
   while ((m = pyFromRegex.exec(cleanDoc)) !== null) {
     for (const id of m[1].match(/[A-Za-z_]\w*/g) ?? []) {
       if (id !== "as") imported.add(id);
@@ -625,7 +655,7 @@ function collectImportedModules(cleanDoc: string): Set<string> {
 }
 
 function detectFileStyle(cleanDoc: string): { quote: "'" | '"'; semi: boolean } {
-  const m = /^\s*import\s+[^;\n]+from\s+(['"])[^'"]+\1(;?)/m.exec(cleanDoc);
+  const m = /^\s*import\s+[^;]+?from\s+(['"])[^'"]+\1(;?)/m.exec(cleanDoc);
   if (m) {
     return {
       quote: (m[1] as "'" | '"') ?? "'",
@@ -681,7 +711,7 @@ function escapeRegExp(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function tryMergeJsTsImport(
+export function tryMergeJsTsImport(
   rawDoc: string,
   cleanDoc: string,
   spec: string,
@@ -689,34 +719,49 @@ function tryMergeJsTsImport(
   isDefault: boolean,
 ): { from: number; to: number; insert: string } | null {
   const escSpec = escapeRegExp(spec);
-  const re = new RegExp(`^([ \\t]*import\\s+)([^;\\n]+?)(\\s+from\\s+(['"])${escSpec}\\4[ \\t]*;?)`, "gm");
+  const re = new RegExp(`^([ \\t]*import\\s+)([^;]+?)(\\s+from\\s+(['"])${escSpec}\\4[ \\t]*;?)`, "gm");
   let m: RegExpExecArray | null;
   while ((m = re.exec(cleanDoc)) !== null) {
     const clauseStart = m.index + m[1].length;
     const clauseEnd = clauseStart + m[2].length;
     const rawClause = rawDoc.slice(clauseStart, clauseEnd).trim();
-    if (rawClause.startsWith("*")) continue;
+    // Nunca fusionar símbolos de runtime dentro de `import type` (TS1361) ni namespace `* as`
+    if (rawClause.startsWith("*") || /^type\b/.test(rawClause)) continue;
+
+    const appendNamedIntoBraces = (clause: string): string | null => {
+      const braceOpen = clause.indexOf("{");
+      const braceClose = clause.lastIndexOf("}");
+      if (braceOpen === -1 || braceClose <= braceOpen) return null;
+      const beforeBrace = clause.slice(0, braceOpen);
+      const afterBrace = clause.slice(braceClose + 1);
+      const innerRaw = clause.slice(braceOpen + 1, braceClose);
+      if (innerRaw.includes("\n")) {
+        const lines = innerRaw.split("\n");
+        const indentMatch = lines.find((l) => l.trim().length > 0)?.match(/^([ \t]*)/);
+        const itemIndent = indentMatch?.[1] ?? "  ";
+        const trimmedRight = innerRaw.replace(/[ \t]*$/, "");
+        const needsComma = trimmedRight.trim().length > 0 && !trimmedRight.trim().endsWith(",");
+        const sep = needsComma ? "," : "";
+        const prefix = trimmedRight.endsWith("\n")
+          ? `${trimmedRight.slice(0, -1)}${sep}\n`
+          : `${trimmedRight}${sep}\n`;
+        return `${beforeBrace}{${prefix}${itemIndent}${symbolName},\n}${afterBrace}`;
+      }
+      const inner = innerRaw.trim();
+      const updatedInner = inner ? `${inner}, ${symbolName}` : symbolName;
+      return `${beforeBrace}{ ${updatedInner} }${afterBrace}`;
+    };
 
     if (isDefault) {
       if (rawClause.startsWith("{")) {
         return { from: clauseStart, to: clauseEnd, insert: `${symbolName}, ${rawClause}` };
       }
-      return null;
+      // Ya existe un import default en esta sentencia; no convertir un export default en `{ Symbol }`
+      continue;
     }
 
-    const braceOpen = rawClause.indexOf("{");
-    const braceClose = rawClause.lastIndexOf("}");
-    if (braceOpen !== -1 && braceClose > braceOpen) {
-      const inner = rawClause.slice(braceOpen + 1, braceClose).trim();
-      const updatedInner = inner ? `${inner}, ${symbolName}` : symbolName;
-      const beforeBrace = rawClause.slice(0, braceOpen);
-      const afterBrace = rawClause.slice(braceClose + 1);
-      return {
-        from: clauseStart,
-        to: clauseEnd,
-        insert: `${beforeBrace}{ ${updatedInner} }${afterBrace}`,
-      };
-    }
+    const merged = appendNamedIntoBraces(rawClause);
+    if (merged) return { from: clauseStart, to: clauseEnd, insert: merged };
 
     if (/^[A-Za-z_$][\w$]*$/.test(rawClause)) {
       return { from: clauseStart, to: clauseEnd, insert: `${rawClause}, { ${symbolName} }` };
@@ -803,8 +848,7 @@ function applySymbolCompletion(
   const alreadyImported =
     !importStmt ||
     cleanOther.includes(importStmt.trim()) ||
-    new RegExp(`^\\s*import\\b[^;\\n]*\\b${escSym}\\b`, "m").test(cleanOther) ||
-    new RegExp(`^\\s*from\\s+[.\\w]+\\s+import\\b[^\\n]*\\b${escSym}\\b`, "m").test(cleanOther) ||
+    collectImportedModules(cleanOther).has(symbolName) ||
     new RegExp(`^\\s*use\\b[^;\\n]*\\b${escSym}\\b`, "m").test(cleanOther);
 
   if (alreadyImported) {
@@ -818,33 +862,36 @@ function applySymbolCompletion(
   // Intenta fusionar dentro de un import existente del mismo modulo (estilo VS Code)
   if (JS_LIKE_EXTS.has(ext)) {
     const spec = isPackage ? targetPathOrPkg : relativeModulePath(activePath, targetPathOrPkg);
-    const mergeEdit = tryMergeJsTsImport(doc, cleanDoc, spec, symbolName, isDefault);
-    if (mergeEdit && mergeEdit.to <= from) {
-      const delta = mergeEdit.insert.length - (mergeEdit.to - mergeEdit.from);
-      view.dispatch({
-        changes: [
-          mergeEdit,
-          { from, to, insert: symbolName },
-        ],
-        selection: { anchor: from + delta + symbolName.length },
-      });
-      return;
+    if (spec) {
+      const mergeEdit = tryMergeJsTsImport(doc, cleanDoc, spec, symbolName, isDefault);
+      if (mergeEdit && mergeEdit.to <= from) {
+        const delta = mergeEdit.insert.length - (mergeEdit.to - mergeEdit.from);
+        view.dispatch({
+          changes: [
+            mergeEdit,
+            { from, to, insert: symbolName },
+          ],
+          selection: { anchor: from + delta + symbolName.length },
+        });
+        return;
+      }
     }
   } else if (ext === "py" || ext === "pyw") {
-    const modSpec = isPackage
-      ? targetPathOrPkg
-      : relativeModulePath(activePath, targetPathOrPkg).replace(/^\.\//, "").replace(/\//g, ".");
-    const mergeEdit = tryMergePythonImport(doc, cleanDoc, modSpec, symbolName);
-    if (mergeEdit && mergeEdit.to <= from) {
-      const delta = mergeEdit.insert.length - (mergeEdit.to - mergeEdit.from);
-      view.dispatch({
-        changes: [
-          mergeEdit,
-          { from, to, insert: symbolName },
-        ],
-        selection: { anchor: from + delta + symbolName.length },
-      });
-      return;
+    const rel = isPackage ? targetPathOrPkg : relativeModulePath(activePath, targetPathOrPkg);
+    if (rel) {
+      const modSpec = rel.replace(/^\.\//, "").replace(/\//g, ".");
+      const mergeEdit = tryMergePythonImport(doc, cleanDoc, modSpec, symbolName);
+      if (mergeEdit && mergeEdit.to <= from) {
+        const delta = mergeEdit.insert.length - (mergeEdit.to - mergeEdit.from);
+        view.dispatch({
+          changes: [
+            mergeEdit,
+            { from, to, insert: symbolName },
+          ],
+          selection: { anchor: from + delta + symbolName.length },
+        });
+        return;
+      }
     }
   }
 
@@ -858,17 +905,31 @@ function applySymbolCompletion(
   });
 }
 
-function findImportInsertOffset(doc: string, ext: string): number {
+export function findImportInsertOffset(doc: string, ext: string): number {
   const lines = doc.split("\n");
   let offset = 0;
   let afterHeaderOffset = 0;
   let lastImportEnd = -1;
   let inBlockComment = false;
+  let multilineClose: "js" | "py" | "rust" | null = null;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const trimmed = line.trim();
     const nextOffset = Math.min(offset + line.length + 1, doc.length);
+
+    if (multilineClose) {
+      lastImportEnd = nextOffset;
+      if (
+        (multilineClose === "js" && (/\bfrom\s+['"][^'"]+['"]/.test(trimmed) || trimmed.endsWith(";"))) ||
+        (multilineClose === "py" && trimmed.includes(")")) ||
+        (multilineClose === "rust" && trimmed.includes(";"))
+      ) {
+        multilineClose = null;
+      }
+      offset = nextOffset;
+      continue;
+    }
 
     if (inBlockComment) {
       if (trimmed.includes("*/")) inBlockComment = false;
@@ -908,6 +969,17 @@ function findImportInsertOffset(doc: string, ext: string): number {
 
     if (isImportLine) {
       lastImportEnd = nextOffset;
+      if (trimmed.startsWith("import ")) {
+        const isSideEffect = /^import\s+['"][^'"]+['"]/.test(trimmed);
+        const hasFrom = /\bfrom\s+['"][^'"]+['"]/.test(trimmed);
+        if (!isSideEffect && !hasFrom && !trimmed.endsWith(";")) {
+          multilineClose = "js";
+        }
+      } else if (trimmed.startsWith("from ") && trimmed.includes("(") && !trimmed.includes(")")) {
+        multilineClose = "py";
+      } else if (trimmed.startsWith("use ") && trimmed.includes("{") && !trimmed.includes(";")) {
+        multilineClose = "rust";
+      }
     } else if (!trimmed || trimmed.startsWith("//") || trimmed.startsWith("#")) {
       // comentarios o lineas vacias antes del bloque de codigo no rompen el bloque
     } else {

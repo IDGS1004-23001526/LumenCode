@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { normalizePath } from "../domain/path";
+import { normalizePath, parentDirOf, pathsEqual } from "../domain/path";
 import { lspSpecFor, type LspServerSpec } from "../presentation/editor/languages";
 
 export interface LspTextEdit {
@@ -79,16 +79,35 @@ const REQUEST_TIMEOUT_MS = 1_200;
 
 export function pathToUri(path: string): string {
   const normalized = path.replace(/\\/g, "/");
+  const encodeSegments = (p: string) =>
+    p
+      .split("/")
+      .map((seg, idx) => (idx === 0 && /^[A-Za-z]:$/.test(seg) ? seg : encodeURIComponent(seg)))
+      .join("/");
   if (/^[A-Za-z]:\//.test(normalized)) {
-    return `file:///${normalized}`;
+    return `file:///${encodeSegments(normalized)}`;
   }
-  return normalized.startsWith("/") ? `file://${normalized}` : `file:///${normalized}`;
+  // UNC: \\server\share\a.ts -> file://server/share/a.ts (la authority es el servidor)
+  if (/^\/\/[^/]/.test(normalized)) {
+    return `file://${encodeSegments(normalized.replace(/^\/+/, ""))}`;
+  }
+  const encoded = encodeSegments(normalized);
+  return encoded.startsWith("/") ? `file://${encoded}` : `file:///${encoded}`;
 }
 
 export function uriToPath(uri: string): string {
   if (!uri.startsWith("file://")) return uri;
-  let raw = decodeURIComponent(uri.slice("file://".length));
-  if (/^\/[A-Za-z]:/.test(raw)) raw = raw.slice(1);
+  let raw = uri.slice("file://".length);
+  try {
+    raw = decodeURIComponent(raw);
+  } catch {
+    // Mantiene la cadena original si contiene secuencias % malformadas
+  }
+  if (/^\/[A-Za-z]:/.test(raw)) return normalizePath(raw.slice(1));
+  // UNC: file://server/share/a.ts -> \\server\share\a.ts
+  if (!raw.startsWith("/")) {
+    return normalizePath(`\\\\${raw.replace(/\//g, "\\")}`);
+  }
   return normalizePath(raw);
 }
 
@@ -96,9 +115,13 @@ class LspClientManager {
   private sessions = new Map<string, LspSession>();
   private unavailable = new Set<string>();
   private openDocs = new Map<string, OpenDoc>();
+  private openTabMeta = new Map<string, { text: string; rootPath: string | null }>();
+  private docSeq = new Map<string, number>();
   private diagListeners = new Set<DiagnosticsListener>();
   private nextId = 1;
-  private listenersAttached = false;
+  private listenersReady: Promise<void> | null = null;
+  private generation = 0;
+  private stopBarrier: Promise<void> = Promise.resolve();
 
   onDiagnostics(cb: DiagnosticsListener): () => void {
     this.diagListeners.add(cb);
@@ -112,68 +135,92 @@ class LspClientManager {
   }
 
   private findPathByUri(uri: string): string | null {
-    const target = uri.toLowerCase();
+    const targetPath = uriToPath(uri);
+    for (const path of this.openDocs.keys()) {
+      if (pathsEqual(path, targetPath)) return path;
+    }
+    const targetLower = uri.toLowerCase();
     for (const [path, doc] of this.openDocs.entries()) {
-      if (doc.uri.toLowerCase() === target) return path;
+      if (doc.uri.toLowerCase() === targetLower) return path;
     }
     return null;
   }
 
-  private ensureListeners() {
-    if (this.listenersAttached) return;
-    this.listenersAttached = true;
-
-    void listen<{ server_key: string; payload: string }>("lsp:message", (ev) => {
-      const session = this.sessions.get(ev.payload.server_key);
-      if (!session) return;
-      try {
-        const msg = JSON.parse(ev.payload.payload) as {
-          id?: number;
-          method?: string;
-          params?: { uri?: string; diagnostics?: LspDiagnostic[] };
-          result?: unknown;
-          error?: { message?: string };
-        };
-        if (typeof msg.id === "number") {
-          const req = session.pending.get(msg.id);
-          if (req) {
-            clearTimeout(req.timer);
-            session.pending.delete(msg.id);
-            if (msg.error) req.reject(new Error(msg.error.message ?? "LSP error"));
-            else req.resolve(msg.result);
+  private ensureListeners(): Promise<void> {
+    if (this.listenersReady) return this.listenersReady;
+    this.listenersReady = Promise.all([
+      listen<{ server_key: string; payload: string }>("lsp:message", (ev) => {
+        const session = this.sessions.get(ev.payload.server_key);
+        if (!session) return;
+        try {
+          const msg = JSON.parse(ev.payload.payload) as {
+            id?: number | string;
+            method?: string;
+            params?: { uri?: string; diagnostics?: LspDiagnostic[] };
+            result?: unknown;
+            error?: { message?: string };
+          };
+          if (msg.id !== undefined && typeof msg.method === "string") {
+            // Petición servidor -> cliente (ej. workspace/configuration, client/registerCapability)
+            const rawItems = (msg.params as { items?: unknown[] } | undefined)?.items;
+            const result =
+              msg.method === "workspace/configuration"
+                ? (Array.isArray(rawItems) ? rawItems.map(() => null) : [])
+                : null;
+            const reply = JSON.stringify({ jsonrpc: "2.0", id: msg.id, result });
+            void invoke("lsp_send", { serverKey: session.serverKey, payload: reply }).catch(() => {});
+          } else if (typeof msg.id === "number") {
+            const req = session.pending.get(msg.id);
+            if (req) {
+              clearTimeout(req.timer);
+              session.pending.delete(msg.id);
+              if (msg.error) req.reject(new Error(msg.error.message ?? "LSP error"));
+              else req.resolve(msg.result);
+            }
+          } else if (msg.method === "textDocument/publishDiagnostics" && msg.params?.uri) {
+            const filePath = this.findPathByUri(msg.params.uri);
+            if (filePath) {
+              const diags = msg.params.diagnostics ?? [];
+              for (const cb of this.diagListeners) cb(filePath, diags);
+            }
           }
-        } else if (msg.method === "textDocument/publishDiagnostics" && msg.params?.uri) {
-          const filePath = this.findPathByUri(msg.params.uri);
-          if (filePath) {
-            const diags = msg.params.diagnostics ?? [];
-            for (const cb of this.diagListeners) cb(filePath, diags);
-          }
+        } catch {
+          // Ignorar frames JSON malformados
         }
-      } catch {
-        // Ignorar frames JSON malformados
-      }
-    });
-
-    void listen<{ server_key: string }>("lsp:closed", (ev) => {
-      this.cleanupSession(ev.payload.server_key);
-    });
+      }),
+      listen<{ server_key: string }>("lsp:closed", (ev) => {
+        this.cleanupSession(ev.payload.server_key);
+      }),
+    ]).then(() => undefined);
+    return this.listenersReady;
   }
 
   private cleanupSession(serverKey: string) {
     const session = this.sessions.get(serverKey);
-    if (!session) return;
-    if (session.idleTimer) clearTimeout(session.idleTimer);
-    for (const req of session.pending.values()) {
-      clearTimeout(req.timer);
-      req.reject(new Error("LSP session closed"));
+    if (session) {
+      if (session.idleTimer) clearTimeout(session.idleTimer);
+      for (const req of session.pending.values()) {
+        clearTimeout(req.timer);
+        req.reject(new Error("LSP session closed"));
+      }
+      session.pending.clear();
+      this.sessions.delete(serverKey);
     }
-    session.pending.clear();
-    this.sessions.delete(serverKey);
+    for (const [docPath, doc] of [...this.openDocs.entries()]) {
+      if (doc.serverKey === serverKey) {
+        if (doc.changeTimer) clearTimeout(doc.changeTimer);
+        this.openDocs.delete(docPath);
+      }
+    }
   }
 
   private async getOrStartSession(spec: LspServerSpec, rootPath: string): Promise<LspSession | null> {
+    const gen = this.generation;
+    await this.stopBarrier;
+    if (gen !== this.generation) return null;
     if (this.unavailable.has(spec.serverKey)) return null;
-    this.ensureListeners();
+    await this.ensureListeners();
+    if (gen !== this.generation) return null;
 
     const existing = this.sessions.get(spec.serverKey);
     if (existing) {
@@ -182,6 +229,7 @@ class LspClientManager {
         existing.idleTimer = null;
       }
       const ok = await existing.ready;
+      if (gen !== this.generation || this.sessions.get(spec.serverKey) !== existing) return null;
       return ok ? existing : null;
     }
 
@@ -201,9 +249,15 @@ class LspClientManager {
           candidates: spec.candidates,
           cwd: rootPath,
         });
+        if (gen !== this.generation || this.sessions.get(spec.serverKey) !== session) {
+          if (started) void invoke("lsp_stop", { serverKey: spec.serverKey }).catch(() => {});
+          return false;
+        }
         if (!started) {
           this.unavailable.add(spec.serverKey);
-          this.sessions.delete(spec.serverKey);
+          if (this.sessions.get(spec.serverKey) === session) {
+            this.sessions.delete(spec.serverKey);
+          }
           return false;
         }
 
@@ -228,17 +282,48 @@ class LspClientManager {
           },
         }, 4_000);
 
+        if (gen !== this.generation || this.sessions.get(spec.serverKey) !== session) {
+          void invoke("lsp_stop", { serverKey: spec.serverKey }).catch(() => {});
+          return false;
+        }
+
         this.sendNotification(session, "initialized", {});
         session.initialized = true;
+        // Re-registra pestañas que seguían abiertas si el servidor se reinició tras inactividad o caída
+        for (const [tabPath, meta] of this.openTabMeta.entries()) {
+          if (this.openDocs.has(tabPath)) continue;
+          const tabSpec = lspSpecFor(tabPath);
+          if (!tabSpec || tabSpec.serverKey !== spec.serverKey) continue;
+          const tabUri = pathToUri(tabPath);
+          const reopenedDoc: OpenDoc = {
+            uri: tabUri,
+            serverKey: tabSpec.serverKey,
+            languageId: tabSpec.languageId,
+            version: 1,
+            changeTimer: null,
+          };
+          this.openDocs.set(tabPath, reopenedDoc);
+          this.sendNotification(session, "textDocument/didOpen", {
+            textDocument: {
+              uri: tabUri,
+              languageId: tabSpec.languageId,
+              version: reopenedDoc.version,
+              text: meta.text,
+            },
+          });
+        }
         return true;
       } catch {
-        this.cleanupSession(spec.serverKey);
+        if (this.sessions.get(spec.serverKey) === session) {
+          this.cleanupSession(spec.serverKey);
+        }
         return false;
       }
     })();
 
     this.sessions.set(spec.serverKey, session);
     const ok = await session.ready;
+    if (gen !== this.generation || this.sessions.get(spec.serverKey) !== session) return null;
     return ok ? session : null;
   }
 
@@ -280,11 +365,28 @@ class LspClientManager {
     const spec = lspSpecFor(path);
     if (!spec) return;
 
-    const uri = pathToUri(path);
-    const cwd = rootPath ?? path.replace(/[\\/][^\\/]+$/, "");
-    const session = await this.getOrStartSession(spec, cwd);
-    if (!session) return;
+    this.openTabMeta.set(path, { text, rootPath });
+    const seq = (this.docSeq.get(path) ?? 0) + 1;
+    this.docSeq.set(path, seq);
 
+    const uri = pathToUri(path);
+    const cwd = rootPath ?? parentDirOf(path);
+    const session = await this.getOrStartSession(spec, cwd);
+    if (!session || this.docSeq.get(path) !== seq || !this.openTabMeta.has(path)) return;
+
+    const prevDoc = this.openDocs.get(path);
+    if (prevDoc && prevDoc.serverKey === spec.serverKey) {
+      // Ya fue abierto durante `initialized` (reapertura automática de `openTabMeta`);
+      // solo sincronizamos con `didChange` si el texto cambió mientras arrancaba el servidor.
+      const latestText = this.openTabMeta.get(path)?.text ?? text;
+      if (latestText !== text) {
+        this.changeDocument(path, latestText);
+      }
+      return;
+    }
+    if (prevDoc?.changeTimer) clearTimeout(prevDoc.changeTimer);
+
+    const latestText = this.openTabMeta.get(path)?.text ?? text;
     const doc: OpenDoc = {
       uri,
       serverKey: spec.serverKey,
@@ -299,22 +401,30 @@ class LspClientManager {
         uri,
         languageId: spec.languageId,
         version: doc.version,
-        text,
+        text: latestText,
       },
     });
   }
 
   changeDocument(path: string, text: string): void {
+    const meta = this.openTabMeta.get(path);
+    if (meta) meta.text = text;
     const doc = this.openDocs.get(path);
-    if (!doc) return;
+    if (!doc) {
+      if (meta) void this.openDocument(path, text, meta.rootPath);
+      return;
+    }
     const session = this.sessions.get(doc.serverKey);
     if (!session || !session.initialized) return;
 
     if (doc.changeTimer) clearTimeout(doc.changeTimer);
     doc.changeTimer = setTimeout(() => {
       doc.changeTimer = null;
+      if (this.openDocs.get(path) !== doc) return;
+      const liveSession = this.sessions.get(doc.serverKey);
+      if (!liveSession || !liveSession.initialized) return;
       doc.version += 1;
-      this.sendNotification(session, "textDocument/didChange", {
+      this.sendNotification(liveSession, "textDocument/didChange", {
         textDocument: { uri: doc.uri, version: doc.version },
         contentChanges: [{ text }],
       });
@@ -322,6 +432,8 @@ class LspClientManager {
   }
 
   closeDocument(path: string): void {
+    this.openTabMeta.delete(path);
+    this.docSeq.set(path, (this.docSeq.get(path) ?? 0) + 1);
     const doc = this.openDocs.get(path);
     if (!doc) return;
     if (doc.changeTimer) clearTimeout(doc.changeTimer);
@@ -341,6 +453,9 @@ class LspClientManager {
     if (!stillUsed) {
       if (session.idleTimer) clearTimeout(session.idleTimer);
       session.idleTimer = setTimeout(() => {
+        if (this.sessions.get(doc.serverKey) !== session) return;
+        const usedNow = [...this.openDocs.values()].some((d) => d.serverKey === doc.serverKey);
+        if (usedNow) return;
         this.cleanupSession(doc.serverKey);
         void invoke("lsp_stop", { serverKey: doc.serverKey }).catch(() => {});
       }, IDLE_SHUTDOWN_MS);
@@ -445,14 +560,19 @@ class LspClientManager {
   }
 
   async stopAll(): Promise<void> {
+    this.generation += 1;
     for (const doc of this.openDocs.values()) {
       if (doc.changeTimer) clearTimeout(doc.changeTimer);
     }
     this.openDocs.clear();
+    this.openTabMeta.clear();
+    this.unavailable.clear();
     for (const key of [...this.sessions.keys()]) {
       this.cleanupSession(key);
     }
-    await invoke("lsp_stop_all").catch(() => {});
+    const op = this.stopBarrier.then(() => invoke("lsp_stop_all").catch(() => undefined)).then(() => undefined);
+    this.stopBarrier = op;
+    await op;
   }
 }
 

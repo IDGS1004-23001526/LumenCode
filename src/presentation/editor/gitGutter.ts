@@ -5,6 +5,7 @@ import { gitClient, toRelativeRepoPath } from "../../infraestructure/gitClient";
 import { h } from "../dom";
 
 export const setGitHunksEffect = StateEffect.define<DiffHunk[]>();
+export const requestGitGutterRefreshEffect = StateEffect.define<void>();
 
 class GitGutterMarker extends GutterMarker {
   constructor(
@@ -38,8 +39,11 @@ const gitHunksField = StateField.define<DiffHunk[]>({
 });
 
 let activePeek: HTMLElement | null = null;
+let activeOutsideCleanup: (() => void) | null = null;
 
-function closePeek() {
+export function closeGitPeek() {
+  activeOutsideCleanup?.();
+  activeOutsideCleanup = null;
   activePeek?.remove();
   activePeek = null;
 }
@@ -47,6 +51,7 @@ function closePeek() {
 export interface GitGutterDeps {
   getPath: () => string | null;
   getRepoRoot: () => string | null;
+  isActiveTab: () => boolean;
   onGitMutated: () => void;
 }
 
@@ -54,8 +59,10 @@ export function createGitGutterExtension(deps: GitGutterDeps): Extension {
   let cachedHeadText: string | null = null;
   let lastLoadedKey = "";
   let recalcTimer: ReturnType<typeof setTimeout> | null = null;
+  let fetchGen = 0;
 
   async function refreshFromHead(view: EditorView, forceHeadFetch = false) {
+    if (!deps.isActiveTab()) return;
     const filePath = deps.getPath();
     const repoRoot = deps.getRepoRoot();
     if (!filePath || !repoRoot) {
@@ -66,6 +73,7 @@ export function createGitGutterExtension(deps: GitGutterDeps): Extension {
     const relPath = toRelativeRepoPath(repoRoot, filePath);
     if (!relPath) return;
 
+    const gen = ++fetchGen;
     const key = `${repoRoot}|${relPath}`;
     if (forceHeadFetch || key !== lastLoadedKey || cachedHeadText === null) {
       lastLoadedKey = key;
@@ -76,12 +84,15 @@ export function createGitGutterExtension(deps: GitGutterDeps): Extension {
       }
     }
 
+    if (gen !== fetchGen || !deps.isActiveTab()) return;
+
     const hunks = computeDiffHunks(cachedHeadText, view.state.doc.toString());
     view.dispatch({ effects: setGitHunksEffect.of(hunks) });
   }
 
   function openPeekAt(view: EditorView, lineFrom: number, hunk: DiffHunk) {
-    closePeek();
+    closeGitPeek();
+    if (!deps.isActiveTab()) return;
     const coords = view.coordsAtPos(lineFrom);
     if (!coords) return;
 
@@ -90,17 +101,22 @@ export function createGitGutterExtension(deps: GitGutterDeps): Extension {
     const relPath = filePath && repoRoot ? toRelativeRepoPath(repoRoot, filePath) : null;
 
     const revertBlock = () => {
-      closePeek();
+      closeGitPeek();
+      if (!deps.isActiveTab()) return;
       const doc = view.state.doc;
       if (hunk.kind === "add") {
-        const fromLine = doc.line(Math.max(1, hunk.newStart));
-        const toLine = doc.line(Math.min(doc.lines, hunk.newStart + hunk.newCount - 1));
+        const startNum = Math.max(1, Math.min(doc.lines, hunk.newStart));
+        const endNum = Math.max(startNum, Math.min(doc.lines, hunk.newStart + hunk.newCount - 1));
+        const fromLine = doc.line(startNum);
+        const toLine = doc.line(endNum);
         const delFrom = fromLine.from > 0 ? fromLine.from - 1 : 0;
         const delTo = fromLine.from > 0 ? toLine.to : Math.min(doc.length, toLine.to + 1);
         view.dispatch({ changes: { from: delFrom, to: delTo, insert: "" } });
       } else if (hunk.kind === "modify") {
-        const fromLine = doc.line(Math.max(1, hunk.newStart));
-        const toLine = doc.line(Math.min(doc.lines, hunk.newStart + hunk.newCount - 1));
+        const startNum = Math.max(1, Math.min(doc.lines, hunk.newStart));
+        const endNum = Math.max(startNum, Math.min(doc.lines, hunk.newStart + hunk.newCount - 1));
+        const fromLine = doc.line(startNum);
+        const toLine = doc.line(endNum);
         view.dispatch({
           changes: { from: fromLine.from, to: toLine.to, insert: hunk.oldLines.join("\n") },
         });
@@ -115,9 +131,12 @@ export function createGitGutterExtension(deps: GitGutterDeps): Extension {
 
     const stageBlock = async () => {
       if (!repoRoot || !relPath) return;
-      closePeek();
+      closeGitPeek();
       try {
-        const patch = buildHunkPatch(relPath, hunk);
+        const patch = buildHunkPatch(relPath, hunk, {
+          isNewFile: (cachedHeadText ?? "").length === 0,
+          isDeletedFile: view.state.doc.length === 0,
+        });
         await gitClient.applyPatch(repoRoot, patch, true, false);
         deps.onGitMutated();
       } catch {
@@ -137,7 +156,7 @@ export function createGitGutterExtension(deps: GitGutterDeps): Extension {
           { class: "git-peek-actions" },
           relPath ? h("button", { class: "btn ghost git-peek-btn", onclick: () => void stageBlock() }, "Stage") : null,
           h("button", { class: "btn ghost git-peek-btn", onclick: revertBlock }, "Revertir"),
-          h("button", { class: "btn ghost git-peek-btn", onclick: closePeek }, "×"),
+          h("button", { class: "btn ghost git-peek-btn", onclick: closeGitPeek }, "×"),
         ),
       ),
       h(
@@ -150,17 +169,20 @@ export function createGitGutterExtension(deps: GitGutterDeps): Extension {
 
     document.body.append(peek);
     const rect = peek.getBoundingClientRect();
-    peek.style.left = `${Math.min(coords.left + 20, window.innerWidth - rect.width - 12)}px`;
-    peek.style.top = `${Math.min(coords.bottom + 4, window.innerHeight - rect.height - 12)}px`;
+    peek.style.left = `${Math.max(12, Math.min(coords.left + 20, window.innerWidth - rect.width - 12))}px`;
+    peek.style.top = `${Math.max(12, Math.min(coords.bottom + 4, window.innerHeight - rect.height - 12))}px`;
     activePeek = peek;
 
     const onOutside = (ev: MouseEvent) => {
       if (activePeek && !activePeek.contains(ev.target as Node)) {
-        closePeek();
-        document.removeEventListener("mousedown", onOutside);
+        closeGitPeek();
       }
     };
-    setTimeout(() => document.addEventListener("mousedown", onOutside));
+    const timer = setTimeout(() => document.addEventListener("mousedown", onOutside));
+    activeOutsideCleanup = () => {
+      clearTimeout(timer);
+      document.removeEventListener("mousedown", onOutside);
+    };
   }
 
   return [
@@ -210,9 +232,20 @@ export function createGitGutterExtension(deps: GitGutterDeps): Extension {
       },
     }),
     EditorView.updateListener.of((u) => {
+      if (!deps.isActiveTab()) return;
+      const requestedRefresh = u.transactions.some((tr) =>
+        tr.effects.some((e) => e.is(requestGitGutterRefreshEffect)),
+      );
+      if (requestedRefresh) {
+        void refreshFromHead(u.view, true);
+        return;
+      }
       if (u.docChanged) {
         if (recalcTimer) clearTimeout(recalcTimer);
-        recalcTimer = setTimeout(() => void refreshFromHead(u.view, false), 180);
+        recalcTimer = setTimeout(() => {
+          recalcTimer = null;
+          if (deps.isActiveTab()) void refreshFromHead(u.view, false);
+        }, 180);
       } else if (u.startState.doc.length === 0 && u.state.doc.length > 0) {
         void refreshFromHead(u.view, true);
       }

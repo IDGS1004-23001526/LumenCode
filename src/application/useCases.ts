@@ -1,6 +1,6 @@
 import type { DiffPayload, GitCommitFile, GitFileStatus } from "../domain/git";
 import type { FileNode } from "../domain/types";
-import { hasFileExtension, imageMimeFor, isImageFile, isTextFile, isValidName, joinPath, parentDirOf } from "../domain/path";
+import { hasFileExtension, imageMimeFor, isImageFile, isTextFile, isValidName, joinPath, normalizePath, parentDirOf, pathsEqual } from "../domain/path";
 import { gitClient } from "../infraestructure/gitClient";
 import type { AppStore } from "./reducer";
 import type { DialogPort, EditorPort, FileSystemPort, TerminalPort } from "./ports";
@@ -19,6 +19,11 @@ export type UseCases = ReturnType<typeof createUseCases>;
 
 export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }: Deps) {
   const st = () => store.getState();
+  const isDiffPath = (path: string) => path.startsWith("git-diff://") || path.startsWith("conflict:");
+  const findOpenTab = (path: string) => st().tabs.find((t) => pathsEqual(t.path, path));
+  let workspaceLoadGen = 0;
+  let gitRefreshGen = 0;
+  const inFlightOpens = new Map<string, Promise<string | null>>();
 
   async function loadChildren(path: string): Promise<boolean> {
     try {
@@ -30,18 +35,24 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
   }
 
   async function loadWorkspace(root: string) {
+    const gen = ++workspaceLoadGen;
     let tree: FileNode[];
     try {
       tree = await fs.readDir(root);
     } catch (e) {
       return dialogs.error(`No se pudo leer la carpeta.\n\n${String(e)}`);
     }
+    if (gen !== workspaceLoadGen) return;
     terminal.setCwd(root); // antes del dispatch para que el prompt se actualice
     store.dispatch({ type: "workspace/loaded", root, tree });
     // Recarga subcarpetas que estaban abiertas (padres antes que hijos).
     const open = [...st().expanded].filter((p) => p !== root).sort((a, b) => a.length - b.length);
-    for (const p of open) await loadChildren(p);
-    void indexer.scanWorkspace(root);
+    for (const p of open) {
+      if (gen !== workspaceLoadGen) return;
+      await loadChildren(p);
+    }
+    if (gen !== workspaceLoadGen) return;
+    void indexer.scanWorkspace(root, getOpenDirtyBuffers);
     void refreshGit();
   }
 
@@ -50,9 +61,45 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
     if (root) await loadWorkspace(root);
   }
 
+  async function openFileDialog() {
+    const path = await dialogs.pickFile();
+    if (path) await openFile(path);
+  }
+
+  async function reloadOpenTabsFromDisk() {
+    const tabs = [...st().tabs];
+    for (const tab of tabs) {
+      if (isDiffPath(tab.path) || isImageFile(tab.path) || !editor.isEditable(tab.path)) continue;
+      if (tab.dirty) continue;
+      try {
+        const exists = await fs.exists(tab.path);
+        const afterExists = st().tabs.find((t) => t.path === tab.path);
+        if (!afterExists || afterExists.dirty) continue;
+        if (!exists) {
+          editor.close(tab.path);
+          store.dispatch({ type: "tab/close", path: tab.path });
+          continue;
+        }
+        const disk = await fs.readText(tab.path);
+        const afterRead = st().tabs.find((t) => t.path === tab.path);
+        if (!afterRead || afterRead.dirty || !editor.isEditable(tab.path)) continue;
+        if (disk !== editor.getText(tab.path)) {
+          editor.setText(tab.path, disk);
+          indexer.updateFile(tab.path, disk);
+          store.dispatch({ type: "tab/dirty", path: tab.path, dirty: false });
+        }
+      } catch {
+        // Ignora errores transitorios de lectura en pestañas externas
+      }
+    }
+  }
+
   async function refresh() {
     const root = st().rootPath;
-    if (root) await loadWorkspace(root);
+    if (root) {
+      await loadWorkspace(root);
+      await reloadOpenTabsFromDisk();
+    }
   }
 
   async function toggleFolder(node: FileNode) {
@@ -63,40 +110,68 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
     store.dispatch({ type: "tree/setExpanded", path: node.path, expanded: !isOpen });
   }
 
-  async function openFile(path: string) {
-    if (st().tabs.some((t) => t.path === path)) {
-      store.dispatch({ type: "tab/activate", path }); // ya abierto → foco
-      return;
+  async function openFile(path: string): Promise<string | null> {
+    const existing = findOpenTab(path);
+    if (existing) {
+      store.dispatch({ type: "tab/activate", path: existing.path }); // ya abierto → foco
+      return existing.path;
     }
-    if (isImageFile(path)) {
+    const norm = normalizePath(path);
+    const lockKey = /^[A-Z]:\\/.test(norm) ? norm.toLowerCase() : norm;
+    const pending = inFlightOpens.get(lockKey);
+    if (pending) return pending;
+
+    const op = (async (): Promise<string | null> => {
+      const recheck = findOpenTab(path);
+      if (recheck) {
+        store.dispatch({ type: "tab/activate", path: recheck.path });
+        return recheck.path;
+      }
+      if (isImageFile(path)) {
+        try {
+          const bytes = await fs.readBinary(path);
+          const blob = new Blob([new Uint8Array(bytes)], { type: imageMimeFor(path) });
+          const url = URL.createObjectURL(blob);
+          editor.openImage(path, url, bytes.byteLength);
+          store.dispatch({ type: "tab/open", path });
+          return path;
+        } catch (e) {
+          await dialogs.error(`No se pudo abrir la imagen.\n\n${String(e)}`);
+          return null;
+        }
+      }
+      if (!isTextFile(path)) {
+        await dialogs.error("Este tipo de archivo no se puede abrir en el editor.");
+        return null;
+      }
       try {
-        const bytes = await fs.readBinary(path);
-        const blob = new Blob([new Uint8Array(bytes)], { type: imageMimeFor(path) });
-        const url = URL.createObjectURL(blob);
-        editor.openImage(path, url, bytes.byteLength);
+        const text = await fs.readText(path);
+        editor.open(path, text);
+        indexer.updateFile(path, text);
+        if (indexer.index.files.size <= 1) {
+          void indexer.scanDirectory(parentDirOf(path));
+        }
         store.dispatch({ type: "tab/open", path });
+        return path;
       } catch (e) {
-        await dialogs.error(`No se pudo abrir la imagen.\n\n${String(e)}`);
+        await dialogs.error(`No se pudo abrir el archivo.\n\n${String(e)}`);
+        return null;
       }
-      return;
-    }
-    if (!isTextFile(path)) return dialogs.error("Este tipo de archivo no se puede abrir en el editor.");
+    })();
+
+    inFlightOpens.set(lockKey, op);
     try {
-      const text = await fs.readText(path);
-      editor.open(path, text);
-      indexer.updateFile(path, text);
-      if (indexer.index.files.size <= 1) {
-        void indexer.scanDirectory(parentDirOf(path));
-      }
-      store.dispatch({ type: "tab/open", path });
-    } catch (e) {
-      await dialogs.error(`No se pudo abrir el archivo.\n\n${String(e)}`);
+      return await op;
+    } finally {
+      inFlightOpens.delete(lockKey);
     }
   }
 
   async function openFileAt(path: string, line: number, character: number) {
-    await openFile(path);
-    editor.revealPosition(path, line, character);
+    const openedPath = await openFile(path);
+    if (openedPath) {
+      editor.revealPosition(openedPath, line, character);
+    }
   }
 
   async function closeTab(path: string) {
@@ -105,11 +180,12 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
     if (tab.dirty && !(await dialogs.confirm(`"${tab.name}" tiene cambios sin guardar. ¿Cerrar y descartarlos?`))) return;
     editor.close(path);
     store.dispatch({ type: "tab/close", path });
+    if (tab.dirty) scheduleIndexRefresh();
   }
 
   async function saveActive() {
     const path = st().activePath;
-    if (!path) return;
+    if (!path || isDiffPath(path) || isImageFile(path) || !editor.isEditable(path)) return;
     try {
       const content = editor.getText(path);
       await fs.writeText(path, content);
@@ -118,6 +194,55 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
       scheduleGitRefresh();
     } catch (e) {
       await dialogs.error(`No se pudo guardar.\n\n${String(e)}`);
+    }
+  }
+
+  async function saveActiveAs() {
+    const path = st().activePath;
+    if (!path || isDiffPath(path) || isImageFile(path) || !editor.isEditable(path)) return;
+    try {
+      const content = editor.getText(path);
+      const target = await dialogs.saveFile(path);
+      if (!target) return;
+      if (pathsEqual(target, path)) {
+        await saveActive();
+        return;
+      }
+
+      const existingTarget = findOpenTab(target);
+      if (
+        existingTarget?.dirty &&
+        !(await dialogs.confirm(
+          `"${existingTarget.name}" tiene cambios sin guardar en esa ruta. ¿Sobrescribirlos?`,
+          "Sobrescribir",
+        ))
+      ) {
+        return;
+      }
+
+      await fs.writeText(target, content);
+
+      const oldTab = st().tabs.find((t) => t.path === path);
+      // Cierra la pestaña original sin preguntar: su contenido ya se guardó en la nueva ruta.
+      editor.close(path);
+      store.dispatch({ type: "tab/close", path });
+
+      if (existingTarget) {
+        editor.setText(existingTarget.path, content);
+        indexer.updateFile(existingTarget.path, content);
+        store.dispatch({ type: "tab/dirty", path: existingTarget.path, dirty: false });
+        store.dispatch({ type: "tab/activate", path: existingTarget.path });
+      } else {
+        editor.open(target, content);
+        indexer.updateFile(target, content);
+        store.dispatch({ type: "tab/open", path: target });
+      }
+
+      // La ruta anterior sigue en disco: se reindexa para descartar el buffer antiguo.
+      if (oldTab?.dirty) scheduleIndexRefresh();
+      scheduleGitRefresh();
+    } catch (e) {
+      await dialogs.error(`No se pudo guardar como.\n\n${String(e)}`);
     }
   }
 
@@ -199,7 +324,13 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
     const newPath = joinPath(parent, nextName);
 
     try {
-      if (newPath.toLowerCase() !== node.path.toLowerCase() && (await fs.exists(newPath))) {
+      const isCaseOnlyRename = newPath.toLowerCase() === node.path.toLowerCase();
+      if (isCaseOnlyRename) {
+        const siblings = await fs.readDir(parent).catch(() => []);
+        if (siblings.some((s) => s.name === nextName)) {
+          return dialogs.error(`"${nextName}" ya existe en esta ubicación`);
+        }
+      } else if (await fs.exists(newPath)) {
         return dialogs.error(`"${nextName}" ya existe en esta ubicación`);
       }
       await fs.rename(node.path, newPath);
@@ -231,6 +362,8 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
   }
 
   async function refreshGit() {
+    gitClient.cancelScheduledRefresh();
+    const gen = ++gitRefreshGen;
     const root = st().rootPath;
     if (!root) {
       store.dispatch({ type: "git/status", status: null });
@@ -238,7 +371,7 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
     }
     try {
       const status = await gitClient.status(root);
-      if (st().rootPath === root) {
+      if (gen === gitRefreshGen && st().rootPath === root) {
         store.dispatch({ type: "git/status", status });
       }
     } catch {
@@ -246,11 +379,26 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
     }
   }
 
+  function getOpenDirtyBuffers(): Map<string, string> {
+    const out = new Map<string, string>();
+    for (const tab of st().tabs) {
+      if (tab.dirty) out.set(tab.path, editor.getText(tab.path));
+    }
+    return out;
+  }
+
+  function scheduleIndexRefresh() {
+    const root = st().rootPath;
+    if (!root) return;
+    indexer.scheduleRefresh(root, getOpenDirtyBuffers);
+  }
+
   function scheduleGitRefresh() {
     const root = st().rootPath;
     if (!root) return;
+    const gen = ++gitRefreshGen;
     gitClient.scheduleRefresh(root, (status) => {
-      if (st().rootPath === root) {
+      if (gen === gitRefreshGen && st().rootPath === root) {
         store.dispatch({ type: "git/status", status });
       }
     });
@@ -310,14 +458,29 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
     try {
       await gitClient.discard(root, [entry.path], isUntracked);
       const fullPath = joinPath(root, entry.path);
-      if (st().tabs.some((t) => t.path === fullPath)) {
-        if (isUntracked) {
-          editor.close(fullPath);
-          store.dispatch({ type: "tab/close", path: fullPath });
-        } else {
-          const text = await fs.readText(fullPath).catch(() => "");
-          editor.setText(fullPath, text);
-          store.dispatch({ type: "tab/dirty", path: fullPath, dirty: false });
+      const openTab = findOpenTab(fullPath);
+      if (openTab) {
+        if (isUntracked || !(await fs.exists(openTab.path))) {
+          editor.close(openTab.path);
+          store.dispatch({ type: "tab/close", path: openTab.path });
+        } else if (isImageFile(openTab.path)) {
+          try {
+            const bytes = await fs.readBinary(openTab.path);
+            const blob = new Blob([new Uint8Array(bytes)], { type: imageMimeFor(openTab.path) });
+            const url = URL.createObjectURL(blob);
+            editor.openImage(openTab.path, url, bytes.byteLength);
+            if (st().activePath === openTab.path) editor.activate(openTab.path);
+          } catch {
+            // Mantiene la vista previa actual ante fallos transitorios de lectura
+          }
+        } else if (editor.isEditable(openTab.path)) {
+          try {
+            const text = await fs.readText(openTab.path);
+            editor.setText(openTab.path, text);
+            store.dispatch({ type: "tab/dirty", path: openTab.path, dirty: false });
+          } catch {
+            // Mantiene el buffer intacto ante fallos transitorios de lectura
+          }
         }
       }
       await refresh();
@@ -362,6 +525,8 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
           if (pushAfter) {
             if (g.upstream) {
               await gitClient.remoteOp(root, "push");
+            } else if (g.detached) {
+              throw new Error("No se puede publicar en estado HEAD desacoplado. Crea o cambia a una rama primero.");
             } else {
               await gitClient.remoteOp(root, "publish", g.branch);
             }
@@ -399,6 +564,10 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
     const root = repoRoot();
     const g = st().git;
     if (!root || !g) return;
+    if (op === "publish" && g.detached) {
+      await dialogs.error("No se puede publicar en estado HEAD desacoplado. Crea o cambia a una rama primero.");
+      return;
+    }
     const labels: Record<string, string> = {
       fetch: "Obteniendo cambios remotos (Fetch)...",
       pull: "Descargando cambios (Pull)...",
@@ -424,13 +593,15 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
     const root = repoRoot();
     if (!root) return;
     const fullPath = joinPath(root, entry.path);
-    const leftText = await gitClient.showFile(root, "HEAD", entry.path).catch(() => "");
+    const openTab = findOpenTab(fullPath);
+    const leftRef = mode === "staged" ? "HEAD" : ":0";
+    const leftText = await gitClient.showFile(root, leftRef, entry.path).catch(() => "");
     let rightText = "";
     if (mode === "staged") {
       rightText = await gitClient.showFile(root, ":0", entry.path).catch(() => "");
     } else {
-      rightText = st().tabs.some((t) => t.path === fullPath)
-        ? editor.getText(fullPath)
+      rightText = openTab && editor.isEditable(openTab.path)
+        ? editor.getText(openTab.path)
         : await fs.readText(fullPath).catch(() => "");
     }
 
@@ -439,7 +610,7 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
       title: `${entry.path} (${mode === "staged" ? "Staged" : "Working Tree"})`,
       relPath: entry.path,
       repoRoot: root,
-      leftTitle: "HEAD",
+      leftTitle: mode === "staged" ? "HEAD" : "Index",
       rightTitle: mode === "staged" ? "Index (Staged)" : "Working Tree",
       leftText,
       rightText,
@@ -470,7 +641,9 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
 
   function openDiffTab(diff: DiffPayload) {
     editor.openDiff(diff);
+    const alreadyActive = st().activePath === diff.id;
     store.dispatch({ type: "tab/open", path: diff.id });
+    if (alreadyActive) editor.activate(diff.id);
   }
 
   async function gitAddToGitignore(relPath: string) {
@@ -484,26 +657,41 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
     }
   }
 
-  async function gitReloadAfterDiffMutation(repoPath: string, relPath: string) {
+  async function gitReloadAfterDiffMutation(repoPath: string, relPath: string, touchedDisk = true) {
     const fullPath = joinPath(repoPath, relPath);
-    if (st().tabs.some((t) => t.path === fullPath)) {
-      const disk = await fs.readText(fullPath).catch(() => "");
-      editor.setText(fullPath, disk);
-      store.dispatch({ type: "tab/dirty", path: fullPath, dirty: false });
+    const openTab = findOpenTab(fullPath);
+    if (touchedDisk && openTab && editor.isEditable(openTab.path)) {
+      if (!(await fs.exists(openTab.path))) {
+        editor.close(openTab.path);
+        store.dispatch({ type: "tab/close", path: openTab.path });
+      } else {
+        try {
+          const disk = await fs.readText(openTab.path);
+          editor.setText(openTab.path, disk);
+          store.dispatch({ type: "tab/dirty", path: openTab.path, dirty: false });
+        } catch {
+          // Mantiene el buffer intacto ante fallos transitorios de lectura
+        }
+      }
     }
     const active = st().activePath;
-    if (active?.startsWith("git-diff://")) {
-      const mode = active.startsWith("git-diff://staged/") ? "staged" : "working";
-      const leftText = await gitClient.showFile(repoPath, "HEAD", relPath).catch(() => "");
+    const expectedWorking = `git-diff://working/${relPath}`;
+    const expectedStaged = `git-diff://staged/${relPath}`;
+    if (active === expectedWorking || active === expectedStaged) {
+      const mode = active === expectedStaged ? "staged" : "working";
+      const leftRef = mode === "staged" ? "HEAD" : ":0";
+      const leftText = await gitClient.showFile(repoPath, leftRef, relPath).catch(() => "");
       const rightText = mode === "staged"
         ? await gitClient.showFile(repoPath, ":0", relPath).catch(() => "")
-        : await fs.readText(fullPath).catch(() => "");
+        : openTab && editor.isEditable(openTab.path)
+          ? editor.getText(openTab.path)
+          : await fs.readText(fullPath).catch(() => "");
       editor.openDiff({
         id: active,
         title: `${relPath} (${mode === "staged" ? "Staged" : "Working Tree"})`,
         relPath,
         repoRoot: repoPath,
-        leftTitle: "HEAD",
+        leftTitle: mode === "staged" ? "HEAD" : "Index",
         rightTitle: mode === "staged" ? "Index (Staged)" : "Working Tree",
         leftText,
         rightText,
@@ -516,17 +704,20 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
 
   return {
     openFolder,
+    openFileDialog,
     refresh,
     toggleFolder,
     openFile,
     openFileAt,
     closeTab,
     saveActive,
+    saveActiveAs,
     createEntry,
     deleteFile,
     renameEntry,
     refreshGit,
     scheduleGitRefresh,
+    scheduleIndexRefresh,
     gitInit,
     gitStage,
     gitUnstage,

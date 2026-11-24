@@ -5,6 +5,7 @@ export interface ImageEntry {
   url: string;
   byteSize: number;
   zoom: number; // 0 = fit-to-view, >0 = explicit scale (e.g. 1 = 100%)
+  intrinsicZero?: boolean;
 }
 
 function formatBytes(bytes: number): string {
@@ -24,16 +25,21 @@ export function createImagePreviewHost(parent: HTMLElement) {
 
   const applyZoom = () => {
     if (!current || !imgEl) return;
+    const isZeroSizeSvg =
+      current.path.toLowerCase().endsWith(".svg") &&
+      (Boolean(current.intrinsicZero) || (imgEl.complete && imgEl.naturalWidth === 0));
     if (current.zoom === 0) {
       imgEl.style.maxWidth = "100%";
       imgEl.style.maxHeight = "100%";
-      imgEl.style.width = "";
-      imgEl.style.height = "";
+      imgEl.style.width = isZeroSizeSvg ? "320px" : "";
+      imgEl.style.height = isZeroSizeSvg ? "320px" : "";
       imgEl.style.transform = "";
       zoomLabel.textContent = "Ajustar";
     } else {
       imgEl.style.maxWidth = "none";
       imgEl.style.maxHeight = "none";
+      imgEl.style.width = isZeroSizeSvg ? "320px" : "";
+      imgEl.style.height = isZeroSizeSvg ? "320px" : "";
       imgEl.style.transform = `scale(${current.zoom})`;
       imgEl.style.transformOrigin = "center center";
       zoomLabel.textContent = `${Math.round(current.zoom * 100)}%`;
@@ -116,9 +122,9 @@ export function createImagePreviewHost(parent: HTMLElement) {
         if (current !== entry) return;
         const w = img.naturalWidth;
         const h = img.naturalHeight;
-        if (w === 0 && h === 0 && entry.zoom === 0) {
-          img.style.width = "320px";
-          img.style.height = "320px";
+        if (w === 0 && h === 0) {
+          entry.intrinsicZero = true;
+          applyZoom();
         }
         infoEl.textContent = w && h
           ? `${ext} · ${w} × ${h} px · ${formatBytes(entry.byteSize)}`
