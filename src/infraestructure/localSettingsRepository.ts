@@ -11,6 +11,10 @@ export const localSettingsRepository: SettingsRepository = {
         }
     },
     save(settings) {
-        localStorage.setItem(KEY, JSON.stringify(settings));
+        try {
+            localStorage.setItem(KEY, JSON.stringify(settings));
+        } catch {
+            // Ignora errores de cuota/almacenamiento restringido
+        }
     },
 };

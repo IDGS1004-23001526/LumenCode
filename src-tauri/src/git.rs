@@ -2,7 +2,7 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 #[cfg(target_os = "windows")]
@@ -67,6 +67,7 @@ pub struct GitCommitFile {
 fn git_cmd(cwd: &str) -> Command {
     let mut cmd = Command::new("git");
     cmd.current_dir(cwd)
+        .args(["-c", "core.quotepath=false"])
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GCM_INTERACTIVE", "never")
         .env("LC_ALL", "C");
@@ -288,7 +289,21 @@ pub async fn git_status(root_path: String) -> Result<GitStatusResult, String> {
         }
 
         let top = match run_git(&root_path, &["rev-parse", "--show-toplevel"]) {
-            Ok(p) => p.trim().to_string(),
+            Ok(p) => {
+                let trimmed = p.trim();
+                #[cfg(target_os = "windows")]
+                let normalized = {
+                    let mut s = trimmed.replace('/', "\\");
+                    if s.len() >= 2 && s.as_bytes()[1] == b':' {
+                        let first = (s.as_bytes()[0] as char).to_ascii_uppercase();
+                        s.replace_range(0..1, &first.to_string());
+                    }
+                    s
+                };
+                #[cfg(not(target_os = "windows"))]
+                let normalized = trimmed.to_string();
+                normalized
+            }
             Err(_) => {
                 return Ok(GitStatusResult {
                     installed: true,
@@ -322,12 +337,53 @@ pub async fn git_init(root_path: String) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
+/** Valida que una ruta sea estrictamente relativa al repositorio (sin `..`, `.`, prefijos de unidad ni `/` inicial). */
+pub(crate) fn validate_repo_rel_path(rel: &str) -> Result<PathBuf, String> {
+    if rel.is_empty() || rel.chars().any(|c| c.is_control()) {
+        return Err("Ruta de archivo inválida".to_string());
+    }
+    if rel.starts_with('-') || rel.starts_with('/') || rel.starts_with('\\') {
+        return Err(format!("Ruta relativa no permitida: {rel}"));
+    }
+    let normalized = rel.replace('\\', "/");
+    let mut clean = PathBuf::new();
+    let mut count = 0usize;
+    for comp in Path::new(&normalized).components() {
+        match comp {
+            std::path::Component::Normal(part) if !part.is_empty() => {
+                clean.push(part);
+                count += 1;
+            }
+            _ => return Err(format!("Ruta fuera del repositorio o no válida: {rel}")),
+        }
+    }
+    if count == 0 {
+        return Err("Ruta vacía".to_string());
+    }
+    Ok(clean)
+}
+
+/** Valida nombres de rama, revisiones, hashes y referencias de stash contra inyección de flags (`-...`) o caracteres de control. */
+pub(crate) fn validate_git_ref_arg<'a>(val: &'a str, label: &str) -> Result<&'a str, String> {
+    let trimmed = val.trim();
+    if trimmed.is_empty() {
+        return Err(format!("El valor de {label} no puede estar vacío"));
+    }
+    if trimmed.starts_with('-') || trimmed.contains("..") || trimmed.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(format!("Valor de {label} no permitido: {trimmed}"));
+    }
+    Ok(trimmed)
+}
+
 #[tauri::command]
 pub async fn git_stage(root_path: String, paths: Vec<String>) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         if paths.is_empty() {
             run_git(&root_path, &["add", "-A"])?;
             return Ok(());
+        }
+        for p in &paths {
+            validate_repo_rel_path(p)?;
         }
         let mut args = vec!["add", "--"];
         let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
@@ -347,14 +403,17 @@ pub async fn git_unstage(root_path: String, paths: Vec<String>) -> Result<(), St
             if has_head {
                 run_git(&root_path, &["reset", "HEAD"])?;
             } else {
-                run_git(&root_path, &["rm", "-r", "--cached", "--", "."])?;
+                run_git(&root_path, &["rm", "-r", "-f", "--cached", "--", "."])?;
             }
             return Ok(());
+        }
+        for p in &paths {
+            validate_repo_rel_path(p)?;
         }
         let mut args = if has_head {
             vec!["reset", "HEAD", "--"]
         } else {
-            vec!["rm", "--cached", "--"]
+            vec!["rm", "-f", "--cached", "--"]
         };
         let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
         args.extend(refs);
@@ -368,16 +427,53 @@ pub async fn git_unstage(root_path: String, paths: Vec<String>) -> Result<(), St
 #[tauri::command]
 pub async fn git_discard(root_path: String, paths: Vec<String>, untracked: bool) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
+        if paths.is_empty() {
+            return Ok(());
+        }
         if untracked {
+            let root_canon = fs::canonicalize(&root_path).map_err(|e| e.to_string())?;
             for rel in &paths {
-                let target = Path::new(&root_path).join(rel);
-                if target.is_dir() {
-                    fs::remove_dir_all(&target).map_err(|e| e.to_string())?;
-                } else if target.exists() {
+                let clean_rel = validate_repo_rel_path(rel)?;
+                // Verifica que ningún directorio padre intermedio sea un symlink que escape del repo
+                let mut cur = root_canon.clone();
+                let comps: Vec<_> = clean_rel.components().collect();
+                for parent_comp in &comps[..comps.len().saturating_sub(1)] {
+                    cur.push(parent_comp);
+                    if let Ok(m) = fs::symlink_metadata(&cur) {
+                        if m.file_type().is_symlink() {
+                            return Err(format!("No se permite atravesar enlaces simbólicos: {rel}"));
+                        }
+                    }
+                }
+                let target = root_canon.join(&clean_rel);
+                let Ok(meta) = fs::symlink_metadata(&target) else {
+                    continue;
+                };
+                if meta.file_type().is_symlink() {
+                    #[cfg(target_os = "windows")]
+                    {
+                        fs::remove_file(&target)
+                            .or_else(|_| fs::remove_dir(&target))
+                            .map_err(|e| e.to_string())?;
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        fs::remove_file(&target).map_err(|e| e.to_string())?;
+                    }
+                } else if meta.is_dir() {
+                    let target_canon = fs::canonicalize(&target).map_err(|e| e.to_string())?;
+                    if !target_canon.starts_with(&root_canon) || target_canon == root_canon {
+                        return Err(format!("Ruta fuera del repositorio: {rel}"));
+                    }
+                    fs::remove_dir_all(&target_canon).map_err(|e| e.to_string())?;
+                } else {
                     fs::remove_file(&target).map_err(|e| e.to_string())?;
                 }
             }
             return Ok(());
+        }
+        for p in &paths {
+            validate_repo_rel_path(p)?;
         }
         let mut args = vec!["checkout", "--"];
         let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
@@ -420,13 +516,13 @@ pub async fn git_branches(root_path: String) -> Result<GitBranchesResult, String
             .unwrap_or_default()
             .trim()
             .to_string();
-        let local_raw = run_git(&root_path, &["branch", "--format=%(refname:short)"]).unwrap_or_default();
+        let local_raw = run_git(&root_path, &["for-each-ref", "--format=%(refname:short)", "refs/heads"]).unwrap_or_default();
         let remote_raw = run_git(&root_path, &["branch", "-r", "--format=%(refname:short)"]).unwrap_or_default();
 
         let local: Vec<String> = local_raw
             .lines()
             .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.is_empty() && !s.starts_with('('))
             .collect();
         let mut remote_set = BTreeSet::new();
         for line in remote_raw.lines() {
@@ -449,10 +545,11 @@ pub async fn git_branches(root_path: String) -> Result<GitBranchesResult, String
 #[tauri::command]
 pub async fn git_checkout(root_path: String, branch: String, create: bool) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let b = validate_git_ref_arg(&branch, "rama")?;
         if create {
-            run_git(&root_path, &["checkout", "-b", &branch])?;
+            run_git(&root_path, &["checkout", "-b", b])?;
         } else {
-            run_git(&root_path, &["checkout", &branch])?;
+            run_git(&root_path, &["checkout", b])?;
         }
         Ok(())
     })
@@ -463,7 +560,9 @@ pub async fn git_checkout(root_path: String, branch: String, create: bool) -> Re
 #[tauri::command]
 pub async fn git_rename_branch(root_path: String, old_name: String, new_name: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        run_git(&root_path, &["branch", "-m", &old_name, &new_name])?;
+        let old_b = validate_git_ref_arg(&old_name, "rama actual")?;
+        let new_b = validate_git_ref_arg(&new_name, "nueva rama")?;
+        run_git(&root_path, &["branch", "-m", old_b, new_b])?;
         Ok(())
     })
     .await
@@ -473,8 +572,9 @@ pub async fn git_rename_branch(root_path: String, old_name: String, new_name: St
 #[tauri::command]
 pub async fn git_delete_branch(root_path: String, name: String, force: bool) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let b = validate_git_ref_arg(&name, "rama")?;
         let flag = if force { "-D" } else { "-d" };
-        run_git(&root_path, &["branch", flag, &name])?;
+        run_git(&root_path, &["branch", flag, b])?;
         Ok(())
     })
     .await
@@ -489,11 +589,12 @@ pub async fn git_remote_op(root_path: String, op: String, branch: Option<String>
         "pull-rebase" => run_git(&root_path, &["pull", "--rebase"]),
         "push" => run_git(&root_path, &["push"]),
         "publish" => {
-            let b = branch.unwrap_or_default();
-            if b.is_empty() {
+            let raw_b = branch.unwrap_or_default();
+            if raw_b.trim().is_empty() {
                 return Err("No hay rama activa para publicar".to_string());
             }
-            run_git(&root_path, &["push", "-u", "origin", &b])
+            let b = validate_git_ref_arg(&raw_b, "rama")?;
+            run_git(&root_path, &["push", "-u", "origin", "--", b])
         }
         "sync" => {
             run_git(&root_path, &["pull"])?;
@@ -510,7 +611,9 @@ pub async fn git_remote_op(root_path: String, op: String, branch: Option<String>
 #[tauri::command]
 pub async fn git_show_file(root_path: String, rev: String, rel_path: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let spec = format!("{}:{}", rev, rel_path.replace('\\', "/"));
+        let r = validate_git_ref_arg(&rev, "revisión")?;
+        validate_repo_rel_path(&rel_path)?;
+        let spec = format!("{}:{}", r, rel_path.replace('\\', "/"));
         Ok(run_git(&root_path, &["show", &spec]).unwrap_or_default())
     })
     .await
@@ -541,7 +644,8 @@ pub async fn git_apply_patch(
             .map_err(|e| e.to_string())?;
 
         if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(patch.as_bytes()).map_err(|e| e.to_string())?;
+            // No abortar en BrokenPipe: esperar al proceso hijo para recoger el stderr real de `git apply`.
+            let _ = stdin.write_all(patch.as_bytes());
         }
         let out = child.wait_with_output().map_err(|e| e.to_string())?;
         if out.status.success() {
@@ -609,7 +713,11 @@ pub async fn git_stash_op(root_path: String, op: String, ref_name: String) -> Re
             "drop" => "drop",
             _ => return Err("Acción de stash inválida".to_string()),
         };
-        run_git(&root_path, &["stash", action, &ref_name])?;
+        let r = validate_git_ref_arg(&ref_name, "stash")?;
+        if !r.starts_with("stash@{") || !r.ends_with('}') {
+            return Err(format!("Referencia de stash inválida: {r}"));
+        }
+        run_git(&root_path, &["stash", action, r])?;
         Ok(())
     })
     .await
@@ -631,9 +739,11 @@ pub async fn git_log(
             "--format=%H%x09%h%x09%an%x09%ar%x09%s".to_string(),
         ];
         if let Some(p) = rel_path {
-            if !p.trim().is_empty() {
+            let trimmed = p.trim();
+            if !trimmed.is_empty() {
+                validate_repo_rel_path(trimmed)?;
                 args.push("--".to_string());
-                args.push(p);
+                args.push(trimmed.to_string());
             }
         }
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
@@ -660,16 +770,17 @@ pub async fn git_log(
 #[tauri::command]
 pub async fn git_commit_files(root_path: String, hash: String) -> Result<Vec<GitCommitFile>, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let h = validate_git_ref_arg(&hash, "commit")?;
         let raw = run_git(
             &root_path,
-            &["diff-tree", "--no-commit-id", "--name-status", "-r", "--root", &hash],
+            &["diff-tree", "--no-commit-id", "--name-status", "-r", "-m", "--first-parent", "--root", h, "--"],
         )?;
         let mut out = Vec::new();
         for line in raw.lines() {
             let cols: Vec<&str> = line.split('\t').collect();
             if cols.len() >= 2 {
                 let status = cols[0].chars().next().unwrap_or('M').to_string();
-                if cols.len() >= 3 && status == "R" {
+                if cols.len() >= 3 && (status == "R" || status == "C") {
                     out.push(GitCommitFile {
                         status,
                         old_path: Some(cols[1].to_string()),
@@ -693,20 +804,64 @@ pub async fn git_commit_files(root_path: String, hash: String) -> Result<Vec<Git
 #[tauri::command]
 pub async fn git_add_gitignore(root_path: String, pattern: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let clean = pattern.replace('\\', "/").trim().to_string();
+        if clean.is_empty() || clean.chars().any(|c| c == '\r' || c == '\n' || c.is_control()) {
+            return Err("Patrón .gitignore inválido".to_string());
+        }
         let gi_path = Path::new(&root_path).join(".gitignore");
-        let existing = fs::read_to_string(&gi_path).unwrap_or_default();
-        let clean = pattern.replace('\\', "/");
-        if existing.lines().any(|l| l.trim() == clean) {
+        let mut bytes = match fs::read(&gi_path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(format!("No se pudo leer .gitignore: {e}")),
+        };
+        if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) {
+            return Err("El archivo .gitignore está codificado en UTF-16; conviértelo a UTF-8 primero.".to_string());
+        }
+        let lossy = String::from_utf8_lossy(&bytes);
+        if lossy.lines().any(|l| l.trim() == clean) {
             return Ok(());
         }
-        let mut next = existing;
-        if !next.is_empty() && !next.ends_with('\n') {
-            next.push('\n');
+        if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+            bytes.push(b'\n');
         }
-        next.push_str(&clean);
-        next.push('\n');
-        fs::write(&gi_path, next).map_err(|e| e.to_string())
+        bytes.extend_from_slice(clean.as_bytes());
+        bytes.push(b'\n');
+        fs::write(&gi_path, bytes).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_repo_rel_path_blocks_traversal_and_flags() {
+        assert!(validate_repo_rel_path("src/main.ts").is_ok());
+        assert!(validate_repo_rel_path("src\\nested\\file.rs").is_ok());
+        assert!(validate_repo_rel_path("").is_err());
+        assert!(validate_repo_rel_path(".").is_err());
+        assert!(validate_repo_rel_path("..").is_err());
+        assert!(validate_repo_rel_path("../secret.txt").is_err());
+        assert!(validate_repo_rel_path("src/../../outside.txt").is_err());
+        assert!(validate_repo_rel_path("/etc/passwd").is_err());
+        assert!(validate_repo_rel_path("C:\\Windows\\System32").is_err());
+        assert!(validate_repo_rel_path("-rf").is_err());
+        assert!(validate_repo_rel_path("--orphan").is_err());
+    }
+
+    #[test]
+    fn validate_git_ref_arg_blocks_option_injection() {
+        assert!(validate_git_ref_arg("main", "rama").is_ok());
+        assert!(validate_git_ref_arg("feature/login-v2", "rama").is_ok());
+        assert!(validate_git_ref_arg("HEAD~1", "rev").is_ok());
+        assert!(validate_git_ref_arg(":0", "rev").is_ok());
+        assert!(validate_git_ref_arg("stash@{0}", "stash").is_ok());
+        assert!(validate_git_ref_arg("--orphan", "rama").is_err());
+        assert!(validate_git_ref_arg("-D", "rama").is_err());
+        assert!(validate_git_ref_arg("a..b", "rama").is_err());
+        assert!(validate_git_ref_arg("bad branch", "rama").is_err());
+        assert!(validate_git_ref_arg("bad\nbranch", "rama").is_err());
+    }
 }

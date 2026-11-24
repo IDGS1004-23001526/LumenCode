@@ -1,73 +1,120 @@
 # LumenCode
 
-Editor de código minimalista y nativo, hecho con **Tauri 2** (backend en Rust, sin Electron) y **CodeMirror 6** como motor de edición.
+**Un editor de código minimalista, rápido y nativo pensado para escribir sin distracciones.**
 
+LumenCode reúne lo esencial de un editor moderno en una interfaz ligera y coherente: edición cómoda, navegación de proyectos, control de versiones, terminal integrada y herramientas de análisis en tiempo real, todo sin la sobrecarga de los entornos tradicionales.
 
-## Requisitos
+---
 
-- [Rust](https://rustup.rs) (estable)
-- Node.js 20 o superior
-- Dependencias del sistema de Tauri: <https://v2.tauri.app/start/prerequisites/>
-  - Windows: WebView2 (ya viene en Windows 10/11) y las Build Tools de Visual Studio (C++)
-  - Linux: `webkit2gtk-4.1`, `libgtk-3-dev`, etc. (la guía lista los paquetes por distro)
-  - macOS: Xcode Command Line Tools
+## Nuestra visión
 
-## Empezar
+Queremos un editor que se sienta inmediato y que deje el protagonismo al código. Nuestros objetivos son:
 
-```bash
-npm install
+- **Rapidez real:** abrir, editar y navegar sin esperas ni interfaces que se interpongan.
+- **Foco:** una experiencia limpia, con la información justa en el momento justo.
+- **Potencia sin ruido:** autocompletado, diagnósticos, Git y terminal integrados, sin convertir el editor en un laberinto de paneles.
+- **Sensación nativa:** un comportamiento ágil y consistente en cada sistema operativo.
+- **Personalización:** temas, iconos, tipografía y comportamiento adaptables a cada persona.
+- **Evolución abierta:** un proyecto que crece de forma transparente y con la comunidad.
 
-# Genera los íconos de la app (una sola vez). Usa cualquier PNG cuadrado de 1024x1024.
-npx tauri icon ruta/a/tu-logo.png
+---
 
-npm run tauri dev      # modo desarrollo con recarga en vivo
-npm run tauri build    # instalador / ejecutable de producción
-```
+## Funcionalidades
 
-La primera compilación de Rust tarda unos minutos; después es incremental.
+### Edición de código
 
-## Atajos
+- Resaltado de sintaxis para una amplia variedad de lenguajes.
+- Pestañas con indicador de cambios sin guardar.
+- Autocompletado contextual, incluidos **auto-imports** y fragmentos de código.
+- Diagnósticos en tiempo real: errores y advertencias señalados directamente en el editor y reunidos en el panel de **Problemas**.
+- Soporte de servidores de lenguaje para completado, errores, información al pasar el cursor y navegación a definiciones.
+- Búsqueda y reemplazo, selección múltiple, plegado de código, deshacer y rehacer.
+- Apertura de archivos individuales o de proyectos completos.
+- Vista previa integrada de imágenes.
 
-| Atajo          | Acción            |
-| -------------- | ----------------- |
-| `Ctrl/Cmd + O` | Abrir archivo     |
-| `Ctrl/Cmd + S` | Guardar           |
-| `Ctrl+Shift+S` | Guardar como      |
-| `Ctrl/Cmd + N` | Nuevo             |
-| `Ctrl/Cmd + F` | Buscar            |
-| `Ctrl/Cmd + Z` | Deshacer          |
+### Explorador de proyectos
 
-El resto de atajos vienen de CodeMirror (selección múltiple con `Alt+clic`, plegado de código, autocompletado, etc.).
+- Árbol de archivos y carpetas con navegación clara.
+- Crear, renombrar y eliminar archivos o carpetas.
+- Actualización, expansión y colapso del árbol.
+- Acceso rápido a los archivos abiertos y al proyecto actual.
 
-## Estructura
+### Control de versiones
 
-```
-lumen/
-├─ index.html              # estructura de la ventana (barra de título, editor, barra de estado)
-├─ src/
-│  ├─ main.ts              # lógica de la app: abrir/guardar, estado, atajos, ventana
-│  ├─ editor.ts            # configuración de CodeMirror: lenguajes, tema, resaltado
-│  └─ styles.css           # paleta y estilos (todo el color sale de variables CSS)
-└─ src-tauri/
-   ├─ Cargo.toml           # dependencias de Rust
-   ├─ tauri.conf.json      # ventana sin bordes nativos, bundle, etc.
-   ├─ capabilities/        # permisos que el frontend puede usar
-   └─ src/
-      ├─ main.rs           # punto de entrada
-      └─ lib.rs            # registro de plugins (dialog, fs); aquí irán tus comandos Rust
-```
+- Estado de los cambios del proyecto en tiempo real.
+- Preparar y quitar cambios del área de staging.
+- Descartar modificaciones y crear commits.
+- Deshacer el último commit.
+- Gestión de ramas y operaciones con repositorios remotos: actualizar, traer, subir cambios.
+- Historial de commits y diferencias lado a lado.
+- Resolución de conflictos de fusión.
+- Añadir archivos al archivo de exclusiones del repositorio.
 
-## Personalizar
+### Terminal integrada
 
-- **Colores y tipografía:** edita las variables al inicio de `src/styles.css`. El resaltado de sintaxis usa las variables `--syn-*`.
-- **Más lenguajes:** instala el paquete `@codemirror/lang-xxx` y añade un `case` en `languageFor()` dentro de `src/editor.ts`.
-- **Lógica en Rust:** añade funciones con `#[tauri::command]` en `src-tauri/src/lib.rs`, regístralas con `.invoke_handler(tauri::generate_handler![...])` y llámalas desde TypeScript con `invoke()` de `@tauri-apps/api/core`.
+- Terminal dentro del editor, sincronizada con el directorio del proyecto.
+- Ejecución de comandos sin salir de la aplicación.
+- Historial de salida y conservación del directorio de trabajo.
 
-## Ideas para siguientes pasos
+### Apariencia y personalización
 
-1. Pestañas con varios archivos abiertos
-2. Explorador de carpetas (un comando en Rust que liste directorios)
-3. Paleta de comandos (`Ctrl+P`)
-4. Soporte LSP para autocompletado y errores reales
-5. Terminal integrada (crate `portable-pty`)
-6. Selector de temas
+- Temas claros y oscuros, y paletas de la comunidad.
+- Temas de iconos para archivos y carpetas, incluidos temas personalizados.
+- Ajustes de tipografía, tamaño de fuente, cursor y comportamiento del editor.
+- Catálogo de extensiones de apariencia.
+- Animaciones discretas que respetan la preferencia de movimiento reducido del sistema.
+
+### Preferencias
+
+Un panel de preferencias integrado reúne la configuración de edición, apariencia, extensiones y atajos, con buscador para encontrar cada opción rápidamente.
+
+---
+
+## Lenguajes
+
+LumenCode reconoce y resalta, entre otros:
+
+JavaScript, TypeScript, JSX/TSX, HTML, CSS, JSON, Markdown, Python, Rust, C/C++, Java, C#, Go, PHP, SQL, YAML, XML, TOML, Kotlin, Swift, Dart, Ruby, Lua, Shell, PowerShell, Dockerfile y archivos de configuración habituales.
+
+La lista crece con el proyecto.
+
+---
+
+## Plataformas
+
+Disponible para **Windows**, **macOS** y **Linux**.
+
+---
+
+## Atajos principales
+
+| Acción | Atajo |
+| --- | --- |
+| Abrir archivo | `Ctrl/Cmd + O` |
+| Abrir carpeta de proyecto | `Ctrl/Cmd + Shift + O` |
+| Nuevo archivo | `Ctrl/Cmd + N` |
+| Guardar | `Ctrl/Cmd + S` |
+| Guardar como | `Ctrl/Cmd + Shift + S` |
+| Cerrar pestaña | `Ctrl/Cmd + W` |
+| Mostrar u ocultar explorador | `Ctrl/Cmd + B` |
+| Mostrar u ocultar control de versiones | `Ctrl/Cmd + Shift + G` |
+| Mostrar u ocultar terminal | Ctrl/Cmd + \` (acento grave) |
+| Buscar | `Ctrl/Cmd + F` |
+| Aumentar tamaño de fuente | `Ctrl/Cmd + +` |
+| Disminuir tamaño de fuente | `Ctrl/Cmd + -` |
+| Restablecer tamaño de fuente | `Ctrl/Cmd + 0` |
+| Preferencias | `Ctrl/Cmd + ,` |
+
+Además, el editor incorpora atajos de edición habituales: selección múltiple, plegado de código, autocompletado, búsqueda y navegación.
+
+---
+
+## Estado del proyecto
+
+LumenCode está en **desarrollo activo**. La aplicación evoluciona de forma constante: se añaden funcionalidades, se pulen detalles de la experiencia y se mejora el rendimiento. Algunos comportamientos y atajos pueden cambiar entre versiones.
+
+---
+
+## Licencia
+
+LumenCode se distribuye bajo la **Licencia Pública General de GNU v3.0 (GPL-3.0)**. Consulta el archivo [LICENSE](LICENSE) para más detalles.

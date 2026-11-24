@@ -6,6 +6,7 @@ import { acceptCompletion, autocompletion, closeBrackets, closeBracketsKeymap, c
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
 
 import type { DiffPayload } from "../../domain/git";
+import { pathsEqual } from "../../domain/path";
 import type { ProjectIndex } from "../../domain/symbolIndex";
 import { lspClient } from "../../infraestructure/lspClient";
 import { createHtmlEmmetCompletionSource, expandHtmlEmmetAtCursor } from "./htmlEmmetCompletion";
@@ -16,12 +17,12 @@ import { errorLensExtension, lspDiagnosticsToLumen, setDiagnosticsEffect, type L
 import { animateEditorContentIn, animateEditorContentOut } from "../animate";
 import { createDiffPreviewHost } from "./diffViewer";
 import { createGitConflictExtension } from "./gitConflicts";
-import { createGitGutterExtension } from "./gitGutter";
+import { closeGitPeek, createGitGutterExtension, requestGitGutterRefreshEffect } from "./gitGutter";
 import { createImagePreviewHost, type ImageEntry } from "./imagePreview";
 
 import type { EditorPort } from "../../application/ports";
 // import { languageFor } from "./languages";
-import { lumenHighlight, lumenTheme } from "./theme";
+import { createLumenTheme, lumenHighlight } from "./theme";
 import { languageFor } from "./languages";
 
 export interface EditorCallbacks {
@@ -29,11 +30,12 @@ export interface EditorCallbacks {
     getIndex: () => ProjectIndex;
     getAssetFiles?: () => Set<string>;
     getRootPath: () => string | null;
+    getGitRoot?: () => string | null;
     readText: (path: string) => Promise<string>;
     onNavigate: (path: string, line: number, character: number) => void;
     onGitMutated: () => void;
     onOpenDiff: (diff: DiffPayload) => void;
-    onDiffMutated: (repoRoot: string, relPath: string) => Promise<void>;
+    onDiffMutated: (repoRoot: string, relPath: string, touchedDisk: boolean) => Promise<void>;
     confirmAction: (message: string, okLabel?: string) => Promise<boolean>;
     onError: (message: string) => Promise<void>;
     onDiagnostics?: (path: string, diags: LumenDiagnostic[]) => void;
@@ -44,6 +46,7 @@ interface DetectedIndent {
     unit: string;
     tabSize: number;
     label: string;
+    fromFile: boolean;
 }
 
 /**
@@ -79,7 +82,7 @@ function detectFileIndentation(content: string, defaultTabSize: number): Detecte
     }
 
     if (tabLines > spaceLines && tabLines >= 2) {
-        return { unit: "\t", tabSize: defaultTabSize, label: `Tabulación: ${defaultTabSize}` };
+        return { unit: "\t", tabSize: defaultTabSize, label: `Tabulación: ${defaultTabSize}`, fromFile: true };
     }
 
     if (spaceLines >= 2) {
@@ -93,6 +96,7 @@ function detectFileIndentation(content: string, defaultTabSize: number): Detecte
             unit: " ".repeat(detected),
             tabSize: detected,
             label: `Espacios: ${detected}`,
+            fromFile: true,
         };
     }
 
@@ -100,6 +104,7 @@ function detectFileIndentation(content: string, defaultTabSize: number): Detecte
         unit: " ".repeat(defaultTabSize),
         tabSize: defaultTabSize,
         label: `Espacios: ${defaultTabSize}`,
+        fromFile: false,
     };
 }
 
@@ -231,63 +236,60 @@ const elasticOverscroll = ViewPlugin.fromClass(
 /** Un EdtorView y un EditorState por pestaña osea conserva cursor e historial */
 export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks): EditorPort {
     const states = new Map<string, EditorState>();
-    const fileIndents = new Map<string, string>();
+    const fileIndents = new Map<string, DetectedIndent>();
+    const scrollPositions = new Map<string, { top: number; left: number }>();
     let active: string | null = null;
+    let activateGen = 0;
     let currentTabSize = 4;
     let currentWordWrap = false;
+    let currentDark = false;
     let lastConfiguredTabSize: number | null = null;
     let lastConfiguredWordWrap: boolean | null = null;
+    let lastConfiguredDark: boolean | null = null;
 
     const tabSizeConf = new Compartment();
     const indentUnitConf = new Compartment();
     const wordWrapConf = new Compartment();
+    const themeConf = new Compartment();
 
-    const empty = EditorState.create({
-        extensions: [lumenTheme, EditorView.editable.of(false), 
+    let empty = EditorState.create({
+        extensions: [themeConf.of(createLumenTheme(currentDark)), EditorView.editable.of(false), 
             placeholder("Abre un archivo desde el explorador ó Ctrl + O abre una carpeta")],
     });
 
     const build = (path: string, doc: string) => {
         const detected = detectFileIndentation(doc, currentTabSize);
-        fileIndents.set(path, detected.label);
+        fileIndents.set(path, detected);
         const smartSource = createSmartCompletionSource(cb.getIndex, () => path, cb.getAssetFiles);
-        const lspSource = createLspCompletionSource(cb.getIndex, () => path, cb.getAssetFiles);
+        const lspSource = createLspCompletionSource(cb.getIndex, () => active);
         const emmetSource = createHtmlEmmetCompletionSource(() => path);
 
-        const unifiedCompletionSource = async (ctx: CompletionContext): Promise<CompletionResult | null> => {
+        // Fuente local sincrona (< 1 ms): nunca espera al LSP para mostrar auto-imports ni Emmet
+        const fastLocalSource = (ctx: CompletionContext): CompletionResult | null => {
             try {
                 const emmet = emmetSource(ctx);
                 if (emmet && emmet.options.length > 0) return emmet;
 
                 const smart = smartSource(ctx);
-                let lsp: CompletionResult | null = null;
-                if (lspClient.hasActiveServerFor(path)) {
-                    try {
-                        lsp = await lspSource(ctx);
-                    } catch {
-                        lsp = null;
-                    }
-                }
-
-                if (smart && lsp) {
-                    const merged = [...lsp.options];
-                    const seen = new Set(merged.map((o) => `${o.label}|${o.detail ?? ""}`));
-                    for (const opt of smart.options) {
-                        if (!seen.has(`${opt.label}|${opt.detail ?? ""}`)) merged.push(opt);
-                    }
-                    return { from: Math.min(smart.from, lsp.from), options: merged, validFor: smart.validFor ?? lsp.validFor };
-                }
-                if (lsp) return lsp;
                 if (smart) return smart;
 
-                // Delega a fuentes nativas del lenguaje (CSS, HTML tags, SQL, etc.) cuando smart/LSP no aplican
                 const nativeSources = ctx.state.languageDataAt<((c: CompletionContext) => CompletionResult | Promise<CompletionResult | null> | null)>("autocomplete", ctx.pos);
                 for (const src of nativeSources) {
                     if (typeof src !== "function") continue;
-                    const res = await src(ctx);
-                    if (res && res.options.length > 0) return res;
+                    const res = src(ctx);
+                    if (res && !("then" in res) && res.options.length > 0) return res;
                 }
                 return null;
+            } catch {
+                return null;
+            }
+        };
+
+        // Fuente LSP asincrona separada: solo consulta cuando hay servidor activo
+        const asyncLspSource = async (ctx: CompletionContext): Promise<CompletionResult | null> => {
+            if (!lspClient.hasActiveServerFor(path)) return null;
+            try {
+                return await lspSource(ctx);
             } catch {
                 return null;
             }
@@ -299,7 +301,8 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
                 lineNumbers(),
                 createGitGutterExtension({
                     getPath: () => path,
-                    getRepoRoot: cb.getRootPath,
+                    getRepoRoot: () => cb.getGitRoot?.() ?? cb.getRootPath(),
+                    isActiveTab: () => active === path,
                     onGitMutated: cb.onGitMutated,
                 }),
                 createGitConflictExtension(() => path, cb.onOpenDiff),
@@ -324,11 +327,11 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
                     activateOnTypingDelay: 20,
                     maxRenderedOptions: 40,
                     defaultKeymap: true,
-                    override: [unifiedCompletionSource],
+                    override: [fastLocalSource, asyncLspSource],
                 }),
-                createLspHoverExtension(() => path),
+                createLspHoverExtension(() => active),
                 createLspDefinitionExtension({
-                    getActivePath: () => path,
+                    getActivePath: () => active,
                     getIndex: cb.getIndex,
                     readText: cb.readText,
                     onNavigate: cb.onNavigate,
@@ -343,11 +346,11 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
                     { key: "Tab", run: (v) => acceptCompletion(v) || expandHtmlEmmetAtCursor(v, path) },
                     indentWithTab,
                 ]),
-                lumenTheme,
+                themeConf.of(createLumenTheme(currentDark)),
                 syntaxHighlighting(lumenHighlight),
                 languageFor(path).support,
                 EditorView.updateListener.of((u) => {
-                    if (u.docChanged) {
+                    if (u.docChanged && active === path && states.has(path)) {
                         const text = u.state.doc.toString();
                         cb.onChange(path, text);
                         lspClient.changeDocument(path, text);
@@ -368,9 +371,10 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
     });
 
     lspClient.onDiagnostics((diagPath, lspDiags) => {
-        if (diagPath === active) {
+        if (diagPath === active && isTextBuffer(diagPath)) {
             const lumenDiags = lspDiagnosticsToLumen(view.state.doc, lspDiags);
             view.dispatch({ effects: setDiagnosticsEffect.of(lumenDiags) });
+            cb.onDiagnostics?.(diagPath, lumenDiags);
         } else {
             const st = states.get(diagPath);
             if (st) {
@@ -380,6 +384,9 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
             }
         }
     });
+
+    const isTextBuffer = (path: string | null): path is string =>
+        Boolean(path && states.has(path) && !images.has(path) && !diffs.has(path));
 
     return {
         open(path, content) {
@@ -395,8 +402,15 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
             diffs.set(diff.id, diff);
         },
         activate(path) {
+            closeGitPeek();
             const prevActive = active;
-            if (active && active !== path && states.has(active)) states.set(active, view.state);
+            if (isTextBuffer(active) && active !== path) {
+                states.set(active, view.state);
+                scrollPositions.set(active, {
+                    top: view.scrollDOM.scrollTop,
+                    left: view.scrollDOM.scrollLeft,
+                });
+            }
             if (prevActive && prevActive !== path) {
                 const outgoing = images.has(prevActive)
                     ? (parent.querySelector(".image-viewer") as HTMLElement | null)
@@ -406,11 +420,13 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
                 if (outgoing && !outgoing.hidden) animateEditorContentOut(outgoing);
             }
             active = path;
+            const gen = ++activateGen;
 
             const img = path ? images.get(path) : undefined;
             if (img) {
                 diffViewer.hide();
                 view.dom.hidden = true;
+                view.setState(empty);
                 imageViewer.show(img);
                 const viewerEl = parent.querySelector(".image-viewer") as HTMLElement | null;
                 if (viewerEl && prevActive !== path) animateEditorContentIn(viewerEl);
@@ -421,6 +437,7 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
             if (diff) {
                 imageViewer.hide();
                 view.dom.hidden = true;
+                view.setState(empty);
                 diffViewer.show(diff);
                 const diffEl = parent.querySelector(".diff-viewer") as HTMLElement | null;
                 if (diffEl && prevActive !== path) animateEditorContentIn(diffEl);
@@ -431,50 +448,103 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
             diffViewer.hide();
             view.dom.hidden = false;
             const next = path ? states.get(path) : undefined;
+            const savedScroll = path ? (scrollPositions.get(path) ?? { top: 0, left: 0 }) : { top: 0, left: 0 };
             view.setState(next ?? empty);
             if (path && next) {
-                cb.onIndentChange?.(fileIndents.get(path) ?? `Espacios: ${currentTabSize}`);
+                cb.onIndentChange?.(fileIndents.get(path)?.label ?? `Espacios: ${currentTabSize}`);
+                view.dispatch({ effects: requestGitGutterRefreshEffect.of(undefined) });
             } else {
                 cb.onIndentChange?.(`Espacios: ${currentTabSize}`);
             }
+
+            const restoreScroll = () => {
+                if (active !== path || activateGen !== gen) return;
+                view.scrollDOM.scrollTop = savedScroll.top;
+                view.scrollDOM.scrollLeft = savedScroll.left;
+            };
+            restoreScroll();
             if (prevActive !== path) animateEditorContentIn(view.dom);
-            if (next) view.focus();
+            if (next) {
+                view.contentDOM.focus({ preventScroll: true });
+                requestAnimationFrame(() => {
+                    restoreScroll();
+                    view.requestMeasure();
+                });
+            }
         },
         configure(opts) {
             const tabChanged = opts.tabSize !== lastConfiguredTabSize;
             const wrapChanged = opts.wordWrap !== lastConfiguredWordWrap;
-            if (!tabChanged && !wrapChanged) return;
+            const darkChanged = opts.dark !== undefined && opts.dark !== lastConfiguredDark;
+            if (!tabChanged && !wrapChanged && !darkChanged) return;
 
             currentTabSize = opts.tabSize;
             currentWordWrap = opts.wordWrap;
+            if (opts.dark !== undefined) currentDark = opts.dark;
             lastConfiguredTabSize = opts.tabSize;
             lastConfiguredWordWrap = opts.wordWrap;
+            if (opts.dark !== undefined) lastConfiguredDark = opts.dark;
 
-            const effects = [];
-            if (tabChanged) {
-                effects.push(
-                    tabSizeConf.reconfigure(EditorState.tabSize.of(opts.tabSize)),
-                    indentUnitConf.reconfigure(indentUnit.of(" ".repeat(opts.tabSize))),
-                );
-                const label = `Espacios: ${opts.tabSize}`;
-                for (const p of fileIndents.keys()) fileIndents.set(p, label);
-                cb.onIndentChange?.(label);
-            }
-            if (wrapChanged) {
-                effects.push(wordWrapConf.reconfigure(opts.wordWrap ? EditorView.lineWrapping : []));
+            const buildEffectsFor = (filePath: string) => {
+                const effs = [];
+                if (tabChanged) {
+                    const prev = fileIndents.get(filePath);
+                    if (prev?.unit === "\t") {
+                        const updated: DetectedIndent = { ...prev, tabSize: opts.tabSize, label: `Tabulación: ${opts.tabSize}` };
+                        fileIndents.set(filePath, updated);
+                        effs.push(tabSizeConf.reconfigure(EditorState.tabSize.of(opts.tabSize)));
+                    } else if (!prev?.fromFile) {
+                        const updated: DetectedIndent = {
+                            unit: " ".repeat(opts.tabSize),
+                            tabSize: opts.tabSize,
+                            label: `Espacios: ${opts.tabSize}`,
+                            fromFile: false,
+                        };
+                        fileIndents.set(filePath, updated);
+                        effs.push(
+                            tabSizeConf.reconfigure(EditorState.tabSize.of(opts.tabSize)),
+                            indentUnitConf.reconfigure(indentUnit.of(updated.unit)),
+                        );
+                    }
+                }
+                if (wrapChanged) {
+                    effs.push(wordWrapConf.reconfigure(opts.wordWrap ? EditorView.lineWrapping : []));
+                }
+                if (darkChanged) {
+                    effs.push(themeConf.reconfigure(createLumenTheme(currentDark)));
+                }
+                return effs;
+            };
+
+            if (darkChanged) {
+                empty = empty.update({ effects: themeConf.reconfigure(createLumenTheme(currentDark)) }).state;
             }
 
             if (active && !images.has(active) && !diffs.has(active) && states.has(active)) {
-                view.dispatch({ effects });
-                states.set(active, view.state);
+                const effs = buildEffectsFor(active);
+                if (effs.length > 0) {
+                    view.dispatch({ effects: effs });
+                    states.set(active, view.state);
+                }
+            } else if (darkChanged && !active) {
+                view.setState(empty);
             }
             for (const [p, st] of states) {
                 if (p === active) continue;
-                states.set(p, st.update({ effects }).state);
+                const effs = buildEffectsFor(p);
+                if (effs.length > 0) {
+                    states.set(p, st.update({ effects: effs }).state);
+                }
+            }
+
+            if (tabChanged) {
+                const activeLabel = active ? fileIndents.get(active)?.label : undefined;
+                cb.onIndentChange?.(activeLabel ?? `Espacios: ${opts.tabSize}`);
             }
         },
         revealPosition(path, line, character) {
-            if (active !== path) return;
+            if (!active || !pathsEqual(active, path) || !isTextBuffer(active)) return;
+            activateGen++;
             const doc = view.state.doc;
             const lineNum = Math.max(1, Math.min(doc.lines, line + 1));
             const docLine = doc.line(lineNum);
@@ -511,6 +581,11 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
             const indent = fileIndents.get(oldPath);
             fileIndents.delete(oldPath);
             if (indent) fileIndents.set(newPath, indent);
+            const savedScroll = isActive
+                ? { top: view.scrollDOM.scrollTop, left: view.scrollDOM.scrollLeft }
+                : scrollPositions.get(oldPath);
+            scrollPositions.delete(oldPath);
+            if (savedScroll) scrollPositions.set(newPath, savedScroll);
             cb.onDiagnostics?.(oldPath, []);
             lspClient.closeDocument(oldPath);
             void lspClient.openDocument(newPath, content, cb.getRootPath());
@@ -518,6 +593,10 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
             if (isActive) {
                 active = newPath;
                 view.setState(rebuilt);
+                if (savedScroll) {
+                    view.scrollDOM.scrollTop = savedScroll.top;
+                    view.scrollDOM.scrollLeft = savedScroll.left;
+                }
             }
         },
         close(path) {
@@ -543,24 +622,32 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
             }
             states.delete(path);
             fileIndents.delete(path);
-            cb.onDiagnostics?.(path, []);
-            if (active === path) active = null;
+            scrollPositions.delete(path);
+            if (active === path) {
+                active = null;
+                view.setState(empty);
+            }
             lspClient.closeDocument(path);
         },
+        isEditable(path) {
+            return isTextBuffer(path);
+        },
         getText(path) {
+            if (!isTextBuffer(path)) return "";
             const state = path === active ? view.state : states.get(path);
             return state?.doc.toString() ?? "";
         },
         setText(path, content) {
+            if (!isTextBuffer(path)) return;
             if (path === active) {
                 view.dispatch({
                     changes: { from: 0, to: view.state.doc.length, insert: content },
                 });
+                states.set(path, view.state);
                 return;
             }
-            if (states.has(path)) {
-                states.set(path, build(path, content));
-            }
+            states.set(path, build(path, content));
+            lspClient.changeDocument(path, content);
         },
         focus: () => view.focus(),
         remeasure: () => view.requestMeasure(),

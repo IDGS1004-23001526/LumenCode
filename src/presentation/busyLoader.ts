@@ -27,6 +27,11 @@ const LOADER_SVG = `
 let activeCount = 0;
 let overlayEl: HTMLElement | null = null;
 let labelEl: HTMLElement | null = null;
+let keyGuardAttached = false;
+
+export function isBusyLoaderActive(): boolean {
+  return activeCount > 0;
+}
 
 function ensureOverlay(): HTMLElement {
   if (overlayEl && overlayEl.isConnected) return overlayEl;
@@ -45,13 +50,16 @@ function ensureOverlay(): HTMLElement {
   card.append(text);
   wrap.append(card);
 
-  const stopKey = (e: KeyboardEvent) => {
-    if (activeCount > 0) {
-      e.preventDefault();
-      e.stopPropagation();
-    }
-  };
-  window.addEventListener("keydown", stopKey, { capture: true });
+  if (!keyGuardAttached) {
+    keyGuardAttached = true;
+    const stopKey = (e: KeyboardEvent) => {
+      if (activeCount > 0) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    window.addEventListener("keydown", stopKey, { capture: true });
+  }
 
   overlayEl = wrap;
   labelEl = text;

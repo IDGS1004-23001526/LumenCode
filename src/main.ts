@@ -61,11 +61,15 @@ const editor = createCodeMirrorEditor($("editor"), {
   getIndex: () => indexer.index,
   getAssetFiles: () => indexer.assetFiles,
   getRootPath: () => store.getState().rootPath,
+  getGitRoot: () => {
+    const g = store.getState().git;
+    return g?.is_repo ? g.root : store.getState().rootPath;
+  },
   readText: (path) => fs.readText(path),
   onNavigate: (path, line, character) => void uc.openFileAt(path, line, character),
   onGitMutated: () => uc.scheduleGitRefresh(),
   onOpenDiff: (diff) => uc.openDiffTab(diff),
-  onDiffMutated: (repoRoot, relPath) => uc.gitReloadAfterDiffMutation(repoRoot, relPath),
+  onDiffMutated: (repoRoot, relPath, touchedDisk) => uc.gitReloadAfterDiffMutation(repoRoot, relPath, touchedDisk),
   confirmAction: (msg, okLabel) => dialogs.confirm(msg, okLabel),
   onError: (msg) => dialogs.error(msg),
   onDiagnostics: (path, diags) => bottomPanel?.updateDiagnostics(path, diags),
@@ -89,16 +93,21 @@ bottomPanel = mountBottomPanel(
       void uc.refresh();
     } else {
       uc.scheduleGitRefresh();
+      uc.scheduleIndexRefresh();
     }
   },
   (path, line, character) => void uc.openFileAt(path, line, character),
 );
+indexer.setDiagnosticsListener((diagsByFile) => bottomPanel?.replaceWorkspaceDiagnostics(diagsByFile));
 statusBar = mountStatusBar($("statusbar"), store, uc, dialogs.error);
 mountResizers($("sidebar"), $("panel"), () => editor.remeasure());
 mountSettingsModal(store);
 registerShortcuts(store, uc);
 
-window.addEventListener("focus", () => uc.scheduleGitRefresh());
+window.addEventListener("focus", () => {
+  uc.scheduleGitRefresh();
+  uc.scheduleIndexRefresh();
+});
 
 // Efectos globales derivados del estado
 let appliedThemeVars: string[] = [];
@@ -151,13 +160,22 @@ async function updateTaskbarIcon(surface: string, border: string, fg: string, ac
 }
 
 function applySettings(s: Settings) {
-  setAnimationsEnabled(s.animations ?? true);
+  const animEnabled = s.animations ?? true;
+  setAnimationsEnabled(animEnabled);
+  if (!animEnabled) document.documentElement.setAttribute("data-no-anim", "true");
+  else document.documentElement.removeAttribute("data-no-anim");
   const root = document.documentElement.style;
   const activeTheme = findTheme(s.theme);
   for (const k of appliedThemeVars) root.removeProperty(k);
-  appliedThemeVars = Object.keys(activeTheme.colors);
-  for (const [varName, value] of Object.entries(activeTheme.colors)) {
-    root.setProperty(varName, value);
+  const synFn = activeTheme.colors["--syn-function"] ?? activeTheme.colors["--syn-fn"];
+  const safeVarKeys = Object.keys(activeTheme.colors).filter((k) => k.startsWith("--"));
+  appliedThemeVars = [...new Set([...safeVarKeys, "--syn-function", "--syn-fn"])];
+  for (const varName of safeVarKeys) {
+    root.setProperty(varName, activeTheme.colors[varName]);
+  }
+  if (synFn) {
+    root.setProperty("--syn-function", synFn);
+    root.setProperty("--syn-fn", synFn);
   }
   root.setProperty("--tab-inactive", activeTheme.colors["--tab-inactive"] ?? activeTheme.colors["--surface"] ?? "#eaeff5");
   root.setProperty("--fg-faint", activeTheme.colors["--fg-faint"] ?? activeTheme.colors["--fg-muted"] ?? "#9aa5b1");
@@ -204,7 +222,7 @@ function applySettings(s: Settings) {
     activeTheme.colors["--accent"] ?? "#5D9CEC",
   );
   settingsRepo.save(s);
-  editor.configure({ tabSize: s.tabSize, wordWrap: s.wordWrap });
+  editor.configure({ tabSize: s.tabSize, wordWrap: s.wordWrap, dark: activeTheme.dark });
   editor.remeasure();
 }
 
@@ -250,32 +268,47 @@ if (splash) {
     new Promise((r) => setTimeout(r, 400)),
   ]).then(() => requestAnimationFrame(hideSplash));
 }
+let closingWindow = false;
 void appWin.onCloseRequested(async (event) => {
-  const dirty = store.getState().tabs.some((t) => t.dirty);
-  if (dirty) {
-    event.preventDefault();
-    const ok = await dialogs.confirm(
-      "Hay archivos con cambios sin guardar. ¿Salir de todos modos?",
-      "Salir sin guardar",
-    );
-    if (!ok) return;
+  event.preventDefault();
+  if (closingWindow) return;
+  closingWindow = true;
+  try {
+    const dirty = store.getState().tabs.some((t) => t.dirty);
+    if (dirty) {
+      const ok = await dialogs.confirm(
+        "Hay archivos con cambios sin guardar. ¿Salir de todos modos?",
+        "Salir sin guardar",
+      );
+      if (!ok) {
+        closingWindow = false;
+        return;
+      }
+    }
+    await Promise.allSettled([terminal.kill(), lspClient.stopAll()]);
+    await appWin.destroy();
+  } catch {
+    closingWindow = false;
   }
-  await Promise.allSettled([terminal.kill(), lspClient.stopAll()]);
-  await appWin.destroy();
 });
 
 window.addEventListener("contextmenu", (e) => {
+  if (e.defaultPrevented) return;
   e.preventDefault();
 
   const root = store.getState().rootPath;
   const noRoot = !root;
 
+  const activePath = store.getState().activePath;
+  const canSave = Boolean(activePath && editor.isEditable(activePath));
+
   showContextMenu(e.clientX, e.clientY, [
     { label: "Nuevo archivo", disabled: noRoot, run: () => uc.createEntry("file") },
     { label: "Nueva Carpeta", disabled: noRoot, run: () => uc.createEntry("folder") },
     "separator",
-    { label: "Abrir carpeta...", shortcut: "Ctrl+O", run: uc.openFolder },
-    { label: "Guardar archivo", shortcut: "Ctrl+s", disabled: !store.getState().activePath, run: uc.saveActive },
+    { label: "Abrir archivo...", shortcut: "Ctrl+O", run: uc.openFileDialog },
+    { label: "Abrir carpeta...", shortcut: "Ctrl+Shift+O", run: uc.openFolder },
+    { label: "Guardar archivo", shortcut: "Ctrl+s", disabled: !canSave, run: uc.saveActive },
     "separator",
     { label: "Mostrar/ocultar terminal", shortcut: "Ctrl+`", run: () => store.dispatch({ type: "panel/toggle" }) },
     { label: "Preferencias...", shortcut: "Ctrl+,", run: () => store.dispatch({ type: "settings/open", open: true }) },

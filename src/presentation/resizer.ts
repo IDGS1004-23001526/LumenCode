@@ -48,6 +48,20 @@ function attachEdgeResizer({ target, axis, cssVar, getBounds, onResizeEnd }: Edg
 
   handle.addEventListener("pointerup", (e) => stop(e.pointerId));
   handle.addEventListener("pointercancel", (e) => stop(e.pointerId));
+  handle.addEventListener("lostpointercapture", () => stop());
+  window.addEventListener("blur", () => stop());
+  window.addEventListener("resize", () => {
+    const raw = document.documentElement.style.getPropertyValue(cssVar).trim();
+    if (!raw) return;
+    const parsed = parseInt(raw, 10);
+    if (!Number.isFinite(parsed)) return;
+    const { min, max } = getBounds();
+    const clamped = Math.max(min, Math.min(max, parsed));
+    if (clamped !== parsed) {
+      document.documentElement.style.setProperty(cssVar, `${clamped}px`);
+      onResizeEnd?.();
+    }
+  });
   handle.addEventListener("dblclick", () => {
     document.documentElement.style.removeProperty(cssVar);
     onResizeEnd?.();

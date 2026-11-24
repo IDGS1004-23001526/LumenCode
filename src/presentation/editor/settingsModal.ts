@@ -21,6 +21,8 @@ import {
   getCatalogExtensions,
   installExtension,
   isExtensionInstalled,
+  syncRemoveIconExtension,
+  syncRemoveThemeExtension,
   uninstallExtension,
 } from "../../infraestructure/extensionRepository";
 import { cx, h } from "../dom";
@@ -53,9 +55,13 @@ const BLINK_MODES: { label: string; value: CursorBlinking }[] = [
 
 const SHORTCUTS = [
   ["Ctrl + S", "Guardar archivo activo"],
+  ["Ctrl + Shift + S", "Guardar como..."],
+  ["Ctrl + O", "Abrir archivo..."],
+  ["Ctrl + Shift + O", "Abrir carpeta de proyecto..."],
+  ["Ctrl + N", "Nuevo archivo"],
   ["Ctrl + W", "Cerrar pestaña actual"],
-  ["Ctrl + O", "Abrir carpeta de proyecto"],
   ["Ctrl + B", "Mostrar u ocultar el explorador"],
+  ["Ctrl + Shift + G", "Mostrar u ocultar el control de versiones"],
   ["Ctrl + `", "Mostrar u ocultar la terminal"],
   ["Ctrl + +", "Aumentar tamaño de fuente"],
   ["Ctrl + -", "Disminuir tamaño de fuente"],
@@ -154,6 +160,7 @@ export function mountSettingsModal(store: AppStore) {
                 title: "Desinstalar tema",
                 onclick: () => {
                   removeCustomTheme(t.id);
+                  syncRemoveThemeExtension(t.id);
                   if (isActive) store.dispatch({ type: "settings/update", patch: { theme: "lumen-light" } });
                   renderBody(store.getState());
                 },
@@ -220,6 +227,7 @@ export function mountSettingsModal(store: AppStore) {
                 title: "Desinstalar paquete de iconos",
                 onclick: () => {
                   removeCustomIconTheme(it.id);
+                  syncRemoveIconExtension(it.id);
                   if (isActive) store.dispatch({ type: "settings/update", patch: { iconTheme: "lumen-icons" } });
                   renderBody(store.getState());
                 },
@@ -366,8 +374,16 @@ export function mountSettingsModal(store: AppStore) {
     }
 
     // EXTENSIONS 
-    if (activeSection === "extensions" || (q && matches("extensions extensiones tienda tema iconos icons json comunidad"))) {
-      const catalog = getCatalogExtensions();
+    const catalogForSearch = getCatalogExtensions();
+    const matchesAnyExtension = Boolean(
+      q && catalogForSearch.some((e) => matches(`${e.name} ${e.author} ${e.summary} ${e.category}`)),
+    );
+    if (
+      activeSection === "extensions" ||
+      matchesAnyExtension ||
+      (q && matches("extensions extensiones tienda tema iconos icons json comunidad"))
+    ) {
+      const catalog = catalogForSearch;
       const selectedExt = selectedExtId ? catalog.find((e) => e.id === selectedExtId) ?? null : null;
 
       if (selectedExt) {
@@ -455,7 +471,7 @@ export function mountSettingsModal(store: AppStore) {
                   "div",
                   { class: "ext-preview-code" },
                   h("span", { style: `color:${selectedExt.theme.colors["--syn-keyword"]}` }, "export "),
-                  h("span", { style: `color:${selectedExt.theme.colors["--syn-fn"]}` }, "function "),
+                  h("span", { style: `color:${selectedExt.theme.colors["--syn-function"] ?? selectedExt.theme.colors["--syn-fn"]}` }, "function "),
                   h("span", {}, "lumen() { "),
                   h("span", { style: `color:${selectedExt.theme.colors["--syn-string"]}` }, '"ready"'),
                   h("span", {}, " }"),
@@ -541,7 +557,7 @@ export function mountSettingsModal(store: AppStore) {
 
         const filtered = catalog.filter((ext) => {
           if (extFilter === "installed" && !isExtensionInstalled(ext)) return false;
-          if (q && !`${ext.name} ${ext.author} ${ext.summary}`.toLowerCase().includes(q)) return false;
+          if (q && !`${ext.name} ${ext.author} ${ext.summary} ${ext.category}`.toLowerCase().includes(q)) return false;
           return true;
         });
 
@@ -724,6 +740,7 @@ export function mountSettingsModal(store: AppStore) {
 
   searchInput.addEventListener("input", () => {
     query = searchInput.value;
+    if (selectedExtId && query.trim()) selectedExtId = null;
     renderBody(store.getState());
   });
 
@@ -733,19 +750,26 @@ export function mountSettingsModal(store: AppStore) {
   });
 
   dlg.addEventListener("close", () => {
+    isClosing = false;
     if (store.getState().settingsOpen) close();
   });
 
   document.body.append(dlg);
 
+  let isClosing = false;
+
   store.subscribe((s) => {
     if (s.settingsOpen && !dlg.open) {
+      isClosing = false;
       renderNav();
       renderBody(s);
       openPrettyModal(dlg);
       searchInput.focus();
-    } else if (!s.settingsOpen && dlg.open) {
-      closePrettyModal(dlg);
+    } else if (!s.settingsOpen && dlg.open && !isClosing) {
+      isClosing = true;
+      closePrettyModal(dlg, () => {
+        isClosing = false;
+      });
     }
   });
 }

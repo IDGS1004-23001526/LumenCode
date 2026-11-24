@@ -1,4 +1,5 @@
 import type { ThemeManifest } from "../domain/types";
+import { sanitizeCssColor } from "../presentation/icons";
 
 const CUSTOM_THEMES_KEY = "lumencode.customThemes";
 
@@ -89,17 +90,56 @@ export const BUILTIN_THEMES: ThemeManifest[] = [
   },
 ];
 
+function sanitizeThemeColors(raw: unknown): Record<string, string> | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const out: Record<string, string> = {};
+  let count = 0;
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!/^--[a-zA-Z0-9_-]+$/.test(k)) continue;
+    const safe = sanitizeCssColor(v, "");
+    if (safe) {
+      out[k] = safe;
+      count++;
+    }
+  }
+  return count > 0 ? out : null;
+}
+
+function sanitizeThemeManifest(data: Partial<ThemeManifest>): ThemeManifest | null {
+  if (!data || typeof data.name !== "string" || !data.name.trim()) {
+    return null;
+  }
+  const colors = sanitizeThemeColors(data.colors);
+  if (!colors) return null;
+
+  const slug =
+    typeof data.id === "string" && data.id.trim()
+      ? data.id.trim().toLowerCase().replace(/[^a-z0-9-_]+/g, "-").replace(/^-|-$/g, "")
+      : data.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  return {
+    id: slug || `theme-${Date.now()}`,
+    name: data.name.trim(),
+    author: typeof data.author === "string" && data.author.trim() ? data.author.trim() : "Comunidad",
+    dark: Boolean(data.dark),
+    colors,
+  };
+}
+
 export function loadCustomThemes(): ThemeManifest[] {
   try {
     const raw = JSON.parse(localStorage.getItem(CUSTOM_THEMES_KEY) ?? "[]");
-    return Array.isArray(raw) ? raw : [];
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .map((item) => sanitizeThemeManifest(item as Partial<ThemeManifest>))
+      .filter((t): t is ThemeManifest => t !== null);
   } catch {
     return [];
   }
 }
 
 export function getAllThemes(): ThemeManifest[] {
-  return [...BUILTIN_THEMES, ...loadCustomThemes()];
+  const seen = new Set(BUILTIN_THEMES.map((t) => t.id));
+  return [...BUILTIN_THEMES, ...loadCustomThemes().filter((t) => !seen.has(t.id))];
 }
 
 export function findTheme(id: string): ThemeManifest {
@@ -107,33 +147,26 @@ export function findTheme(id: string): ThemeManifest {
 }
 
 export function saveCustomTheme(theme: ThemeManifest): void {
-  const existing = loadCustomThemes().filter((t) => t.id !== theme.id);
-  existing.push(theme);
-  localStorage.setItem(CUSTOM_THEMES_KEY, JSON.stringify(existing));
+  const safe = sanitizeThemeManifest(theme);
+  if (!safe) return;
+  const existing = loadCustomThemes().filter((t) => t.id !== safe.id);
+  existing.push(safe);
+  try {
+    localStorage.setItem(CUSTOM_THEMES_KEY, JSON.stringify(existing));
+  } catch {}
 }
 
 export function removeCustomTheme(id: string): void {
   const next = loadCustomThemes().filter((t) => t.id !== id);
-  localStorage.setItem(CUSTOM_THEMES_KEY, JSON.stringify(next));
+  try {
+    localStorage.setItem(CUSTOM_THEMES_KEY, JSON.stringify(next));
+  } catch {}
 }
 
 export function parseThemeJson(raw: string): ThemeManifest | null {
   try {
     const data = JSON.parse(raw) as Partial<ThemeManifest>;
-    if (!data || typeof data.name !== "string" || !data.colors || typeof data.colors !== "object") {
-      return null;
-    }
-    const id =
-      typeof data.id === "string" && data.id.trim()
-        ? data.id.trim()
-        : data.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-    return {
-      id,
-      name: data.name.trim(),
-      author: typeof data.author === "string" && data.author.trim() ? data.author.trim() : "Comunidad",
-      dark: Boolean(data.dark),
-      colors: data.colors,
-    };
+    return sanitizeThemeManifest(data);
   } catch {
     return null;
   }

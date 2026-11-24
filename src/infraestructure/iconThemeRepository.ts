@@ -1,4 +1,5 @@
 import type { IconSpec, IconThemeManifest } from "../domain/types";
+import { sanitizeCssColor, sanitizeSvgFragment } from "../presentation/icons";
 
 const CUSTOM_ICON_THEMES_KEY = "lumen.customIconThemes.v1";
 
@@ -166,7 +167,10 @@ export function loadCustomIconThemes(): IconThemeManifest[] {
     const raw = localStorage.getItem(CUSTOM_ICON_THEMES_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item) => sanitizeIconThemeManifest(item as Partial<IconThemeManifest>))
+      .filter((t): t is IconThemeManifest => t !== null);
   } catch {
     return [];
   }
@@ -183,39 +187,85 @@ export function findIconTheme(id: string): IconThemeManifest {
 }
 
 export function saveCustomIconTheme(theme: IconThemeManifest): void {
-  const list = loadCustomIconThemes().filter((t) => t.id !== theme.id);
-  list.push(theme);
-  localStorage.setItem(CUSTOM_ICON_THEMES_KEY, JSON.stringify(list));
+  const safe = sanitizeIconThemeManifest(theme);
+  if (!safe) return;
+  const list = loadCustomIconThemes().filter((t) => t.id !== safe.id);
+  list.push(safe);
+  try {
+    localStorage.setItem(CUSTOM_ICON_THEMES_KEY, JSON.stringify(list));
+  } catch {}
 }
 
 export function removeCustomIconTheme(id: string): void {
   const list = loadCustomIconThemes().filter((t) => t.id !== id);
-  localStorage.setItem(CUSTOM_ICON_THEMES_KEY, JSON.stringify(list));
+  try {
+    localStorage.setItem(CUSTOM_ICON_THEMES_KEY, JSON.stringify(list));
+  } catch {}
+}
+
+const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+function sanitizeIconSpec(raw: unknown, fallbackColor: string): IconSpec | null {
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  const color = sanitizeCssColor(obj.color, fallbackColor);
+  const badge = typeof obj.badge === "string" && obj.badge.trim() ? obj.badge.trim().slice(0, 6) : undefined;
+  const svg = typeof obj.svg === "string" ? sanitizeSvgFragment(obj.svg) || undefined : undefined;
+  return { color, ...(badge ? { badge } : {}), ...(svg ? { svg } : {}) };
+}
+
+function sanitizeIconMap(raw: unknown, fallbackColor: string): Record<string, IconSpec> {
+  const out: Record<string, IconSpec> = {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    const key = k.toLowerCase();
+    if (!key || FORBIDDEN_KEYS.has(key)) continue;
+    const spec = sanitizeIconSpec(v, fallbackColor);
+    if (spec) out[key] = spec;
+  }
+  return out;
+}
+
+function sanitizeVars(raw: unknown): Record<string, string> {
+  const out: Record<string, string> = { ...DEFAULT_VARS };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!/^--[a-zA-Z0-9_-]+$/.test(k)) continue;
+    const safe = sanitizeCssColor(v, "");
+    if (safe) out[k] = safe;
+  }
+  return out;
+}
+
+function sanitizeIconThemeManifest(data: Partial<IconThemeManifest>): IconThemeManifest | null {
+  if (!data || typeof data.name !== "string" || !data.name.trim() || !data.fileExtensions || !data.folderNames) {
+    return null;
+  }
+  const id = (typeof data.id === "string" && data.id.trim() ? data.id : data.name)
+    .toLowerCase()
+    .replace(/[^a-z0-9-_]+/g, "-")
+    .replace(/^-|-$/g, "");
+  return {
+    id: id || `icons-${Date.now()}`,
+    name: data.name.trim(),
+    author: typeof data.author === "string" && data.author.trim() ? data.author.trim() : "Comunidad",
+    description: typeof data.description === "string" ? data.description : undefined,
+    vars: sanitizeVars(data.vars),
+    defaultFile: sanitizeIconSpec(data.defaultFile, "var(--fg-muted)") ?? { color: "var(--fg-muted)" },
+    defaultFolder: sanitizeIconSpec(data.defaultFolder, "var(--icon-folder)") ?? { color: "var(--icon-folder)" },
+    defaultFolderOpen: data.defaultFolderOpen
+      ? sanitizeIconSpec(data.defaultFolderOpen, "var(--icon-folder)") ?? undefined
+      : undefined,
+    fileNames: sanitizeIconMap(data.fileNames, "var(--fg-muted)"),
+    fileExtensions: sanitizeIconMap(data.fileExtensions, "var(--fg-muted)"),
+    folderNames: sanitizeIconMap(data.folderNames, "var(--icon-folder)"),
+  };
 }
 
 export function parseIconThemeJson(raw: string): IconThemeManifest | null {
   try {
     const data = JSON.parse(raw) as Partial<IconThemeManifest>;
-    if (!data || typeof data.name !== "string" || !data.fileExtensions || !data.folderNames) {
-      return null;
-    }
-    const id = (data.id || data.name)
-      .toLowerCase()
-      .replace(/[^a-z0-9-_]+/g, "-")
-      .replace(/^-|-$/g, "");
-    return {
-      id: id || `icons-${Date.now()}`,
-      name: data.name,
-      author: typeof data.author === "string" ? data.author : "Comunidad",
-      description: data.description,
-      vars: data.vars ?? DEFAULT_VARS,
-      defaultFile: data.defaultFile ?? { color: "var(--fg-muted)" },
-      defaultFolder: data.defaultFolder ?? { color: "var(--icon-folder)" },
-      defaultFolderOpen: data.defaultFolderOpen,
-      fileNames: data.fileNames ?? {},
-      fileExtensions: data.fileExtensions,
-      folderNames: data.folderNames,
-    };
+    return sanitizeIconThemeManifest(data);
   } catch {
     return null;
   }

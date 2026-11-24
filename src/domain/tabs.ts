@@ -9,5 +9,6 @@ export function nextActiveAfterClose(tabs: Tab[], closing: string, active: strin
 
     if (rest.length === 0) return null;
 
-    return rest[Math.min(index, rest.length - 1)].path;
+    const safeIdx = index < 0 ? 0 : Math.min(index, rest.length - 1);
+    return rest[safeIdx].path;
 }

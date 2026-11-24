@@ -52,7 +52,7 @@ export function mountStatusBar(
             `↓${g.behind} ↑${g.ahead}`,
           ),
         );
-      } else {
+      } else if (!g.detached) {
         leftItems.push(
           h(
             "button",
@@ -72,6 +72,7 @@ export function mountStatusBar(
             "button",
             {
               class: "status-item",
+              "data-git-trigger": "",
               title: "Ver cambios en Source Control (Ctrl+Shift+G)",
               onclick: () => store.dispatch({ type: "git/toggle" }),
             },

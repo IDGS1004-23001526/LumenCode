@@ -9,7 +9,34 @@ use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 #[derive(Default)]
-struct RunningPid(Arc<Mutex<Option<u32>>>);
+struct RunningPid(Arc<Mutex<Vec<u32>>>);
+
+fn kill_terminal_pid(pid: u32) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let _ = Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = Command::new("kill").args(["-9", &format!("-{pid}")]).status();
+        let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+    }
+}
+
+fn stop_all_terminal_processes(running: &RunningPid) {
+    let pids: Vec<u32> = match running.0.lock() {
+        Ok(mut list) => list.drain(..).collect(),
+        Err(_) => return,
+    };
+    for pid in pids {
+        kill_terminal_pid(pid);
+    }
+}
 
 #[derive(Serialize)]
 pub struct TerminalInfo {
@@ -49,9 +76,12 @@ fn default_shell() -> String {
     }
 }
 
-/** Limpia el prefijo `\\?\` que `canonicalize` agrega en Windows. */
+/** Limpia el prefijo `\\?\` (incluyendo UNC `\\?\UNC\`) que `canonicalize` agrega en Windows. */
 fn clean_win_path(p: PathBuf) -> String {
     let s = p.to_string_lossy().to_string();
+    if let Some(unc) = s.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{unc}");
+    }
     s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
 }
 
@@ -67,15 +97,24 @@ fn try_fast_builtin(cwd: &str, line: &str) -> Option<Result<TerminalOutput, Stri
         }));
     }
 
-    // Solo intercepta `cd` simples (sin `&&`, `;` ni `|`)
-    if trimmed.contains("&&") || trimmed.contains(';') || trimmed.contains('|') {
+    // Solo intercepta `cd` simples (sin operadores, comentarios ni saltos de línea)
+    if trimmed.contains("&&")
+        || trimmed.contains(';')
+        || trimmed.contains('|')
+        || trimmed.contains('#')
+        || trimmed.contains('\n')
+        || trimmed.contains('\r')
+    {
         return None;
     }
 
     let rest = if trimmed.eq_ignore_ascii_case("cd") {
         ""
-    } else if trimmed.len() > 3 && trimmed[..3].eq_ignore_ascii_case("cd ") {
-        trimmed[3..].trim()
+    } else if trimmed
+        .get(..3)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("cd "))
+    {
+        trimmed.get(3..).unwrap_or("").trim()
     } else if trimmed.eq_ignore_ascii_case("cd..") {
         ".."
     } else {
@@ -83,6 +122,15 @@ fn try_fast_builtin(cwd: &str, line: &str) -> Option<Result<TerminalOutput, Stri
     };
 
     let target = rest.trim_matches(|c| c == '"' || c == '\'');
+    // Delega al shell real rutas con `~/...`, `cd -` o variables de entorno
+    if target == "-"
+        || target.starts_with("~/")
+        || target.starts_with("~\\")
+        || target.contains('$')
+        || target.contains('%')
+    {
+        return None;
+    }
     let next_path = if target.is_empty() || target == "~" {
         std::env::var("USERPROFILE")
             .or_else(|_| std::env::var("HOME"))
@@ -129,23 +177,18 @@ fn terminal_init() -> TerminalInfo {
 }
 
 #[tauri::command]
-fn terminal_kill(running: State<'_, RunningPid>) -> Result<(), String> {
-    if let Some(pid) = running.0.lock().unwrap().take() {
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            let _ = Command::new("taskkill")
-                .args(["/F", "/T", "/PID", &pid.to_string()])
-                .creation_flags(CREATE_NO_WINDOW)
-                .status();
+async fn terminal_kill(running: State<'_, RunningPid>) -> Result<(), String> {
+    let pids: Vec<u32> = match running.0.lock() {
+        Ok(mut list) => list.drain(..).collect(),
+        Err(e) => return Err(e.to_string()),
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        for pid in pids {
+            kill_terminal_pid(pid);
         }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
-        }
-    }
-    Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -165,16 +208,20 @@ async fn terminal_exec(
     tauri::async_runtime::spawn_blocking(move || {
         let shell = default_shell();
 
+        // Mantiene el lock durante el spawn para que un kill/exit concurrente no se pierda
+        // entre crear el proceso y registrar su PID.
+        let mut pid_guard = pid_holder.lock().ok();
+
         #[cfg(target_os = "windows")]
         let mut child = {
             use std::os::windows::process::CommandExt;
             const CREATE_NO_WINDOW: u32 = 0x08000000;
             let script = format!(
-                "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; \
-                 {line}; \
-                 $__code = if ($?) {{ 0 }} else {{ 1 }}; \
-                 Write-Output '{CWD_MARKER}'; \
-                 Write-Output (Get-Location).Path; \
+                "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n\
+                 {line}\n\
+                 $__code = if ($?) {{ 0 }} else {{ 1 }}\n\
+                 Write-Output '{CWD_MARKER}'\n\
+                 Write-Output (Get-Location).Path\n\
                  exit $__code"
             );
             Command::new(&shell)
@@ -193,6 +240,7 @@ async fn terminal_exec(
 
         #[cfg(not(target_os = "windows"))]
         let mut child = {
+            use std::os::unix::process::CommandExt;
             let script = format!(
                 "{line}\n\
                  __code=$?\n\
@@ -208,20 +256,33 @@ async fn terminal_exec(
                 .env("TERM", "xterm-256color")
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
+                .process_group(0)
                 .spawn()
                 .map_err(|e| e.to_string())?
         };
 
-        *pid_holder.lock().unwrap() = Some(child.id());
+        let child_pid = child.id();
+        if let Some(list) = pid_guard.as_mut() {
+            list.push(child_pid);
+        }
+        drop(pid_guard);
 
         let out_pipe = child.stdout.take().unwrap();
         let err_pipe = child.stderr.take().unwrap();
 
         let app_err = app.clone();
         let err_handle = std::thread::spawn(move || {
-            let reader = BufReader::new(err_pipe);
-            for l in reader.lines().map_while(Result::ok) {
-                let _ = app_err.emit("terminal:line", StreamLine { text: l, is_err: true });
+            let mut reader = BufReader::new(err_pipe);
+            let mut buf = Vec::new();
+            while let Ok(n) = reader.read_until(b'\n', &mut buf) {
+                if n == 0 {
+                    break;
+                }
+                let text = String::from_utf8_lossy(&buf)
+                    .trim_end_matches(&['\r', '\n'][..])
+                    .to_string();
+                buf.clear();
+                let _ = app_err.emit("terminal:line", StreamLine { text, is_err: true });
             }
         });
 
@@ -230,9 +291,17 @@ async fn terminal_exec(
         let app_out = app.clone();
 
         let out_handle = std::thread::spawn(move || {
-            let reader = BufReader::new(out_pipe);
+            let mut reader = BufReader::new(out_pipe);
+            let mut buf = Vec::new();
             let mut awaiting_cwd = false;
-            for l in reader.lines().map_while(Result::ok) {
+            while let Ok(n) = reader.read_until(b'\n', &mut buf) {
+                if n == 0 {
+                    break;
+                }
+                let l = String::from_utf8_lossy(&buf)
+                    .trim_end_matches(&['\r', '\n'][..])
+                    .to_string();
+                buf.clear();
                 if l.trim() == CWD_MARKER {
                     awaiting_cwd = true;
                     continue;
@@ -247,7 +316,9 @@ async fn terminal_exec(
         });
 
         let status = child.wait().map_err(|e| e.to_string())?;
-        *pid_holder.lock().unwrap() = None;
+        if let Ok(mut list) = pid_holder.lock() {
+            list.retain(|&p| p != child_pid);
+        }
         let _ = out_handle.join();
         let _ = err_handle.join();
 
@@ -263,29 +334,41 @@ async fn terminal_exec(
     .map_err(|e| e.to_string())?
 }
 
+fn validate_external_url(url: &str) -> Result<&str, String> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .ok_or_else(|| "URL no permitida".to_string())?;
+    if rest.is_empty() || url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("URL inválida".to_string());
+    }
+    Ok(url)
+}
+
 #[tauri::command]
 fn open_external_url(url: String) -> Result<(), String> {
-    if !url.starts_with("https://") && !url.starts_with("http://") {
-        return Err("URL no permitida".to_string());
-    }
+    let valid_url = validate_external_url(&url)?;
     #[cfg(target_os = "windows")]
     {
-        Command::new("cmd")
-            .args(["/C", "start", "", &url])
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        Command::new("rundll32.exe")
+            .args(["url.dll,FileProtocolHandler", valid_url])
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|e| e.to_string())?;
     }
     #[cfg(target_os = "macos")]
     {
         Command::new("open")
-            .arg(&url)
+            .arg(valid_url)
             .spawn()
             .map_err(|e| e.to_string())?;
     }
     #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
     {
         Command::new("xdg-open")
-            .arg(&url)
+            .arg(valid_url)
             .spawn()
             .map_err(|e| e.to_string())?;
     }
@@ -415,8 +498,43 @@ pub fn run() {
         .expect("error al construir la aplicación Lumen")
         .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
+                let running = app_handle.state::<RunningPid>();
+                stop_all_terminal_processes(&running);
                 let registry = app_handle.state::<lsp::LspRegistry>();
                 lsp::stop_all_processes(&registry);
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn try_fast_builtin_handles_multibyte_utf8_without_panic() {
+        for input in ["áé", "a€", "a😀", "a中文", "ñandú", "€€€"] {
+            assert!(try_fast_builtin(".", input).is_none());
+        }
+        assert!(try_fast_builtin(".", "pwd").is_some());
+    }
+
+    #[test]
+    fn try_fast_builtin_delegates_shell_expressions_and_unc_cleaning() {
+        for input in ["cd ~/projects", "cd -", "cd $HOME", "cd %USERPROFILE%", "cd .. # comment"] {
+            assert!(try_fast_builtin(".", input).is_none(), "should delegate: {input}");
+        }
+        assert_eq!(clean_win_path(PathBuf::from(r"\\?\UNC\server\share\dir")), r"\\server\share\dir");
+        assert_eq!(clean_win_path(PathBuf::from(r"\\?\C:\Users\Dev")), r"C:\Users\Dev");
+    }
+
+    #[test]
+    fn validate_external_url_enforces_http_and_rejects_control_chars() {
+        assert!(validate_external_url("https://example.com/?a=1&b=2").is_ok());
+        assert!(validate_external_url("http://localhost:3000/test?x=1&y=2").is_ok());
+        assert!(validate_external_url("javascript:alert(1)").is_err());
+        assert!(validate_external_url("file:///C:/Windows/System32/calc.exe").is_err());
+        assert!(validate_external_url("https://").is_err());
+        assert!(validate_external_url("https://example.com/a\ncalc").is_err());
+        assert!(validate_external_url("https://example.com/a b").is_err());
+    }
 }

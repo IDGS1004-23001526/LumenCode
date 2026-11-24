@@ -1,5 +1,6 @@
 import type { AppStore } from "../application/reducer";
 import type { UseCases } from "../application/useCases";
+import { isBusyLoaderActive } from "./busyLoader";
 
 const BLOCKED_FUNCTION_KEYS = new Set(["F1", "F3", "F5", "F6", "F7", "F10", "F12"]);
 const BLOCKED_CTRL_KEYS = new Set([
@@ -14,35 +15,36 @@ function isEditableTarget(target: EventTarget | null): boolean {
     return tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable;
 }
 
-export function registerShortcuts(store: AppStore, uc: UseCases) {
-    window.addEventListener("keydown", (e) => {
-        const inEditor = e.target instanceof HTMLElement && Boolean(e.target.closest(".cm-editor"));
+/** En Windows, AltGr dispara ctrlKey && altKey simultáneamente; nunca debe interpretarse como atajo Ctrl+. */
+function isAltGrEvent(e: KeyboardEvent): boolean {
+    return (e.ctrlKey && e.altKey) || Boolean(e.getModifierState?.("AltGraph"));
+}
 
-        // Bloquea navegación atrás/adelante y teclas de función del navegador
-        if (
-            e.key === "BrowserBack" ||
-            e.key === "BrowserForward" ||
-            (e.altKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) ||
-            (!e.defaultPrevented &&
-                BLOCKED_FUNCTION_KEYS.has(e.key) &&
-                !((e.key === "F3" || e.key === "F12") && inEditor))
-        ) {
+export function registerShortcuts(store: AppStore, uc: UseCases) {
+    // Fase capture: solo bloqueo de busyLoader y atajos explícitos de la aplicación.
+    window.addEventListener("keydown", (e) => {
+        if (isBusyLoaderActive()) {
             e.preventDefault();
+            e.stopPropagation();
             return;
         }
 
-        if (!(e.ctrlKey || e.metaKey)) return;
+        if (isAltGrEvent(e)) return;
+        if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
 
         const k = e.key.toLowerCase();
         let action: (() => unknown) | null = null;
 
-        if (k === "s") action = uc.saveActive;
-        else if (k === "w") action = () => { const a = store.getState().activePath; if (a) return uc.closeTab(a); };
-        else if (k === "o") action = uc.openFolder;
-        else if (k === "b") action = () => store.dispatch({ type: "sidebar/toggle" });
+        if (e.shiftKey && k === "s") action = uc.saveActiveAs;
+        else if (!e.shiftKey && k === "s") action = uc.saveActive;
+        else if (!e.shiftKey && k === "o") action = uc.openFileDialog;
+        else if (e.shiftKey && k === "o") action = uc.openFolder;
+        else if (!e.shiftKey && k === "n") action = () => uc.createEntry("file");
+        else if (!e.shiftKey && k === "w") action = () => { const a = store.getState().activePath; if (a) return uc.closeTab(a); };
+        else if (!e.shiftKey && k === "b") action = () => store.dispatch({ type: "sidebar/toggle" });
         else if (e.shiftKey && k === "g") action = () => store.dispatch({ type: "git/toggle" });
-        else if (e.code === "Backquote" || k === "ñ") action = () => store.dispatch({ type: "panel/toggle" });
-        else if (k === ",") action = () => store.dispatch({ type: "settings/open", open: true });
+        else if (!e.shiftKey && (e.code === "Backquote" || k === "ñ")) action = () => store.dispatch({ type: "panel/toggle" });
+        else if (!e.shiftKey && k === ",") action = () => store.dispatch({ type: "settings/open", open: true });
         else if (k === "+" || k === "=" || e.code === "Equal" || e.code === "NumpadAdd") {
             action = () => {
                 const cur = store.getState().settings.fontSize;
@@ -53,26 +55,42 @@ export function registerShortcuts(store: AppStore, uc: UseCases) {
                 const cur = store.getState().settings.fontSize;
                 store.dispatch({ type: "settings/update", patch: { fontSize: Math.max(10, cur - 1) } });
             };
-        } else if (k === "0" || e.code === "Digit0" || e.code === "Numpad0") {
+        } else if (!e.shiftKey && (k === "0" || e.code === "Digit0" || e.code === "Numpad0")) {
             action = () => store.dispatch({ type: "settings/update", patch: { fontSize: 14 } });
         }
 
         if (action) {
             e.preventDefault();
             void action();
+        }
+    }, { capture: true });
+
+    // Fase bubble: bloquea atajos nativos del navegador solo si CodeMirror/controles no los consumieron.
+    window.addEventListener("keydown", (e) => {
+        if (e.defaultPrevented || isAltGrEvent(e)) return;
+
+        const inEditor = e.target instanceof HTMLElement && Boolean(e.target.closest(".cm-editor"));
+
+        if (
+            e.key === "BrowserBack" ||
+            e.key === "BrowserForward" ||
+            (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) ||
+            BLOCKED_FUNCTION_KEYS.has(e.key)
+        ) {
+            e.preventDefault();
             return;
         }
 
-        if (e.defaultPrevented) return;
+        if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
 
-        // Bloquea atajos de navegador (recarga, imprimir, historial, marcadores, nueva pestaña/ventana, devtools, etc.)
+        const k = e.key.toLowerCase();
         const browserOnlyOutsideEditor = (k === "h" || k === "d" || k === "l" || k === "f") && !inEditor;
         const blockedShiftCombo = e.shiftKey && !isEditableTarget(e.target);
 
         if (BLOCKED_CTRL_KEYS.has(k) || browserOnlyOutsideEditor || (blockedShiftCombo && k !== "z")) {
             e.preventDefault();
         }
-    }, { capture: true });
+    }, { capture: false });
 
     // Evita zoom nativo del WebView con Ctrl + rueda del ratón
     window.addEventListener("wheel", (e) => {

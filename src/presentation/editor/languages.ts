@@ -1,5 +1,6 @@
 import { type Extension } from "@codemirror/state";
 import { StreamLanguage } from "@codemirror/language";
+import { fileExtensionOf } from "../../domain/path";
 
 import { javascript } from "@codemirror/lang-javascript";
 import { rust } from "@codemirror/lang-rust";
@@ -50,7 +51,7 @@ export function languageFor(path: string | null): Lang {
     return { name: "EditorConfig", support: StreamLanguage.define(toml) };
   }
 
-  const ext = fileName.split(".").pop() ?? "";
+  const ext = fileExtensionOf(fileName);
   switch (ext) {
     // Web / JS / TS
     case "js":
@@ -161,7 +162,7 @@ export function lspSpecFor(path: string | null): LspServerSpec | null {
     return { serverKey: "dockerfile", languageId: "dockerfile", candidates: [["docker-langserver", ["--stdio"]]] };
   }
 
-  const ext = fileName.split(".").pop() ?? "";
+  const ext = fileExtensionOf(fileName);
   switch (ext) {
     case "js":
     case "mjs":

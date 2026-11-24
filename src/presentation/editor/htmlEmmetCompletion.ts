@@ -62,15 +62,15 @@ interface ParsedEmmet {
   classes: string[];
 }
 
-function parseEmmetAbbreviation(raw: string): ParsedEmmet | null {
+export function parseEmmetAbbreviation(raw: string): ParsedEmmet | null {
   if (!raw || (!raw.includes(".") && !raw.includes("#"))) return null;
 
   let tag = "";
   let id = "";
   const classes: string[] = [];
 
-  // Divide en tokens conservando el prefijo `.` o `#`
-  const parts = raw.match(/(?:^[a-zA-Z][\w-]*)|(?:[.#][a-zA-Z0-9_-]*)/g);
+  // Cada `.` o `#` debe ir seguido de al menos un carácter válido (evita `Hola mundo.`, `...`, `C#`)
+  const parts = raw.match(/(?:^[a-zA-Z][\w-]*)|(?:[.#][a-zA-Z0-9_-]+)/g);
   if (!parts || parts.join("") !== raw) return null;
 
   for (const part of parts) {
@@ -85,6 +85,7 @@ function parseEmmetAbbreviation(raw: string): ParsedEmmet | null {
     }
   }
 
+  if (!id && classes.length === 0) return null;
   if (!tag) tag = "div";
   return { tag, id, classes };
 }
@@ -162,7 +163,7 @@ export function createHtmlEmmetCompletionSource(getActivePath: () => string | nu
     }
 
     // 2. Abreviaciones tipo Emmet con `.` o `#` (ej. `div.container`, `.card`, `span#title.bold`)
-    const emmetMatch = ctx.matchBefore(/(?:^|[\s>])([a-zA-Z][\w-]*)?(?:[.#][a-zA-Z0-9_-]*)+$/);
+    const emmetMatch = ctx.matchBefore(/(?:^|[\s>])([a-zA-Z][\w-]*)?(?:[.#][a-zA-Z0-9_-]+)+$/);
     if (emmetMatch) {
       const raw = emmetMatch.text.replace(/^[\s>]/, "");
       const from = emmetMatch.to - raw.length;
@@ -244,7 +245,7 @@ export function expandHtmlEmmetAtCursor(view: EditorView, activePath: string | n
   }
 
   // 2. `tag.class` / `.class` / `tag#id.class`
-  const emmet = /(?:^|[\s>])((?:[a-zA-Z][\w-]*)?(?:[.#][a-zA-Z0-9_-]*)+)$/.exec(before);
+  const emmet = /(?:^|[\s>])((?:[a-zA-Z][\w-]*)?(?:[.#][a-zA-Z0-9_-]+)+)$/.exec(before);
   if (emmet) {
     const raw = emmet[1];
     const parsed = parseEmmetAbbreviation(raw);

@@ -1,5 +1,5 @@
-import { syntaxTree } from "@codemirror/language";
-import { RangeSetBuilder, StateEffect, StateField, type Extension, type Text } from "@codemirror/state";
+import { LRLanguage, LanguageSupport, syntaxTree } from "@codemirror/language";
+import { RangeSetBuilder, StateEffect, StateField, Text, type Extension } from "@codemirror/state";
 import {
   Decoration,
   EditorView,
@@ -10,8 +10,9 @@ import {
   type DecorationSet,
   type ViewUpdate,
 } from "@codemirror/view";
-import type { SyntaxNodeRef } from "@lezer/common";
+import type { SyntaxNodeRef, Tree } from "@lezer/common";
 import { lspClient, type LspDiagnostic } from "../../infraestructure/lspClient";
+import { languageFor } from "./languages";
 
 export type DiagnosticSeverity = "error" | "warning" | "info";
 
@@ -162,8 +163,16 @@ export const diagnosticsField = StateField.define<{
       }
     }
     if (tr.docChanged && value.list.length > 0) {
+      const remapped = value.list.map((d) => {
+        const nextFrom = Math.min(tr.state.doc.length, tr.changes.mapPos(d.from, 1));
+        const nextTo = Math.max(nextFrom, Math.min(tr.state.doc.length, tr.changes.mapPos(d.to, -1)));
+        const nextLine = tr.state.doc.lineAt(nextFrom).number;
+        return nextFrom === d.from && nextTo === d.to && nextLine === d.line
+          ? d
+          : { ...d, from: nextFrom, to: nextTo, line: nextLine };
+      });
       return {
-        list: value.list,
+        list: remapped,
         decorations: value.decorations.map(tr.changes),
       };
     }
@@ -184,7 +193,7 @@ const errorLensGutter = gutter({
     return new ErrorGutterMarker(lineDiags[0].severity, lineDiags.map((d) => d.message).join("\n"));
   },
   lineMarkerChange(update) {
-    return update.transactions.some((tr) => tr.effects.some((e) => e.is(setDiagnosticsEffect)));
+    return update.docChanged || update.transactions.some((tr) => tr.effects.some((e) => e.is(setDiagnosticsEffect)));
   },
 });
 
@@ -276,32 +285,114 @@ function collectJsonParseError(doc: Text): LumenDiagnostic[] {
   }
 }
 
-function collectSyntaxDiagnostics(view: EditorView, filePath: string): LumenDiagnostic[] {
+function collectJsxTagErrors(doc: Text, tree: ReturnType<typeof syntaxTree>): LumenDiagnostic[] {
+  const stack: { name: string; from: number; to: number; line: number }[] = [];
+  const errors: LumenDiagnostic[] = [];
+
+  tree.iterate({
+    enter(node) {
+      if (node.name === "JSXOpenTag") {
+        const raw = doc.sliceString(node.from, Math.min(node.to, node.from + 80));
+        const m = /^<\s*([A-Za-z_$][\w$.:-]*)/.exec(raw);
+        if (m) {
+          const lineObj = doc.lineAt(node.from);
+          stack.push({ name: m[1], from: node.from, to: node.from + m[0].length, line: lineObj.number });
+        }
+        return;
+      }
+
+      if (node.name === "JSXCloseTag") {
+        const raw = doc.sliceString(node.from, Math.min(node.to, node.from + 80));
+        const m = /^<\/\s*([A-Za-z_$][\w$.:-]*)/.exec(raw);
+        if (!m) return false;
+        const closeName = m[1];
+
+        let matchIdx = -1;
+        for (let i = stack.length - 1; i >= 0; i--) {
+          if (stack[i].name === closeName) {
+            matchIdx = i;
+            break;
+          }
+        }
+
+        if (matchIdx === -1) {
+          const lineObj = doc.lineAt(node.from);
+          errors.push({
+            from: node.from,
+            to: node.to,
+            line: lineObj.number,
+            column: node.from - lineObj.from + 1,
+            severity: "error",
+            message: `Etiqueta de cierre </${closeName}> sin apertura correspondiente`,
+          });
+        } else {
+          // Cualquier etiqueta abierta encima de la coincidencia quedo sin cerrar
+          while (stack.length - 1 > matchIdx) {
+            const unclosed = stack.pop()!;
+            const lineObj = doc.line(unclosed.line);
+            errors.push({
+              from: unclosed.from,
+              to: unclosed.to,
+              line: unclosed.line,
+              column: unclosed.from - lineObj.from + 1,
+              severity: "error",
+              message: `Etiqueta JSX <${unclosed.name}> sin cerrar (se esperaba </${unclosed.name}>)`,
+            });
+          }
+          stack.pop();
+        }
+        return false;
+      }
+    },
+  });
+
+  for (const unclosed of stack) {
+    const lineObj = doc.line(unclosed.line);
+    errors.push({
+      from: unclosed.from,
+      to: unclosed.to,
+      line: unclosed.line,
+      column: unclosed.from - lineObj.from + 1,
+      severity: "error",
+      message: `Etiqueta JSX <${unclosed.name}> sin cerrar (se esperaba </${unclosed.name}>)`,
+    });
+  }
+
+  return errors;
+}
+
+function shouldSkipSyntaxFallback(filePath: string): { skip: boolean; ext: string } {
   const fileName = filePath.split(/[\\/]/).pop()?.toLowerCase() ?? "";
   const ext = fileName.includes(".") ? fileName.split(".").pop() ?? "" : "";
-
-  if (
+  const skip =
     SKIP_LEZER_FALLBACK_EXTS.has(ext) ||
+    fileName === "package-lock.json" ||
     fileName.startsWith("tsconfig") ||
-    fileName.startsWith("jsconfig")
-  ) {
-    return [];
-  }
+    fileName.startsWith("jsconfig");
+  return { skip, ext };
+}
 
-  const doc = view.state.doc;
-  if (ext === "json") {
-    return collectJsonParseError(doc);
-  }
-
-  const tree = syntaxTree(view.state);
+function collectTreeDiagnostics(doc: Text, tree: Tree, ext: string): LumenDiagnostic[] {
   const errors: LumenDiagnostic[] = [];
   const seenLines = new Set<number>();
+
+  const isJsxLike = ["js", "jsx", "tsx", "mjs", "cjs"].includes(ext);
+  const jsxErrors = isJsxLike ? collectJsxTagErrors(doc, tree) : [];
+  for (const err of jsxErrors) {
+    if (!seenLines.has(err.line)) {
+      seenLines.add(err.line);
+      errors.push(err);
+    }
+  }
 
   tree.iterate({
     enter(node) {
       if (errors.length >= 25) return false;
       if (!node.type.isError) return;
       if (isBenignJsxCommentError(doc, node)) return;
+
+      // Si ya reportamos etiquetas JSX sin cerrar en su linea real, evita el error en cascada al final del archivo
+      if (jsxErrors.length > 0 && node.from === node.to && node.from >= doc.length - 1) return;
 
       const lineObj = doc.lineAt(node.from);
       if (seenLines.has(lineObj.number)) return;
@@ -320,6 +411,46 @@ function collectSyntaxDiagnostics(view: EditorView, filePath: string): LumenDiag
   });
 
   return errors;
+}
+
+const MAX_HEADLESS_DIAG_BYTES = 160_000;
+
+/**
+ * Analiza errores de sintaxis/JSON/JSX de cualquier archivo del workspace sin necesidad
+ * de tenerlo abierto en una pestaña (para poblar el panel Problems de todo el proyecto).
+ */
+export function analyzeFileDiagnostics(filePath: string, content: string): LumenDiagnostic[] {
+  if (!content || content.length > MAX_HEADLESS_DIAG_BYTES) return [];
+  const { skip, ext } = shouldSkipSyntaxFallback(filePath);
+  if (skip) return [];
+
+  try {
+    const doc = Text.of(content.split(/\r?\n/));
+    if (ext === "json") {
+      return collectJsonParseError(doc);
+    }
+
+    const lang = languageFor(filePath);
+    if (lang.support instanceof LanguageSupport && lang.support.language instanceof LRLanguage) {
+      const tree = lang.support.language.parser.parse(doc.toString());
+      return collectTreeDiagnostics(doc, tree, ext);
+    }
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+function collectSyntaxDiagnostics(view: EditorView, filePath: string): LumenDiagnostic[] {
+  const { skip, ext } = shouldSkipSyntaxFallback(filePath);
+  if (skip) return [];
+
+  const doc = view.state.doc;
+  if (ext === "json") {
+    return collectJsonParseError(doc);
+  }
+
+  return collectTreeDiagnostics(doc, syntaxTree(view.state), ext);
 }
 
 function createSyntaxFallbackPlugin(

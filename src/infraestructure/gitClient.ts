@@ -11,7 +11,8 @@ export function toRelativeRepoPath(repoRoot: string, fullPath: string): string |
   const normRoot = repoRoot.replace(/\\/g, "/").replace(/\/+$/, "");
   const normFile = fullPath.replace(/\\/g, "/");
   const prefix = `${normRoot}/`;
-  if (normFile.toLowerCase().startsWith(prefix.toLowerCase())) {
+  const isWin = /^[A-Za-z]:/.test(normRoot);
+  if (isWin ? normFile.toLowerCase().startsWith(prefix.toLowerCase()) : normFile.startsWith(prefix)) {
     return normFile.slice(prefix.length);
   }
   return null;
@@ -30,6 +31,13 @@ class GitClient {
       this.refreshTimer = null;
       void this.status(rootPath).then(onResult).catch(() => {});
     }, delayMs);
+  }
+
+  cancelScheduledRefresh(): void {
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = null;
+    }
   }
 
   init(rootPath: string): Promise<void> {

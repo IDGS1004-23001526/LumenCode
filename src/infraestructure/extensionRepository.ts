@@ -396,7 +396,9 @@ export function loadInstalledExtensionIds(): Set<string> {
 }
 
 function saveInstalledIds(ids: Set<string>): void {
-  localStorage.setItem(INSTALLED_KEY, JSON.stringify([...ids]));
+  try {
+    localStorage.setItem(INSTALLED_KEY, JSON.stringify([...ids]));
+  } catch {}
 }
 
 export function getCatalogExtensions(): ExtensionManifest[] {
@@ -453,4 +455,22 @@ export function uninstallExtension(ext: ExtensionManifest): void {
   saveInstalledIds(ids);
   if (ext.theme) removeCustomTheme(ext.theme.id);
   if (ext.iconTheme) removeCustomIconTheme(ext.iconTheme.id);
+}
+
+export function syncRemoveThemeExtension(themeId: string): void {
+  const ids = loadInstalledExtensionIds();
+  let changed = false;
+  for (const ext of COMMUNITY_EXTENSIONS) {
+    if (ext.theme?.id === themeId && ids.delete(ext.id)) changed = true;
+  }
+  if (changed) saveInstalledIds(ids);
+}
+
+export function syncRemoveIconExtension(iconThemeId: string): void {
+  const ids = loadInstalledExtensionIds();
+  let changed = false;
+  for (const ext of COMMUNITY_EXTENSIONS) {
+    if (ext.iconTheme?.id === iconThemeId && ids.delete(ext.id)) changed = true;
+  }
+  if (changed) saveInstalledIds(ids);
 }
