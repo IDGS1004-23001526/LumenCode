@@ -9,6 +9,7 @@ import { cx, h, iconButton } from "../dom";
 import { ICONS, iconForFile, iconForFolder } from "../icons";
 import { findIconTheme } from "../../infraestructure/iconThemeRepository";
 import { showContextMenu } from "../contextMenu";
+import { beginEditorDrag, endEditorDrag, onEditorDragEnd } from "../editor/tabDrag";
 
 export function mountExplorer(el: HTMLElement, store: AppStore, uc: UseCases) {
     const treeEl = h("div", { class: "tree", role: "tree", tabIndex: 0 });
@@ -21,6 +22,10 @@ export function mountExplorer(el: HTMLElement, store: AppStore, uc: UseCases) {
         }
     });
 
+    onEditorDragEnd(() => {
+        treeEl.querySelectorAll(".tree-row.dragging").forEach((n) => n.classList.remove("dragging"));
+    });
+
     function openMenuAt(x: number, y: number, targetDir?: string, fileNode?: FileNode, isRoot = false) {
         const root = store.getState().rootPath;
         const noRoot = !root;
@@ -31,7 +36,10 @@ export function mountExplorer(el: HTMLElement, store: AppStore, uc: UseCases) {
             ...(fileNode && !isRoot
                 ? [
                     ...(!fileNode.isDir
-                        ? [{ label: `Abrir "${fileNode.name}"`, run: () => uc.openFile(fileNode.path) }]
+                        ? [
+                            { label: `Abrir "${fileNode.name}"`, run: () => uc.openFile(fileNode.path) },
+                            { label: `Abrir "${fileNode.name}" a la derecha`, run: () => uc.openFileInSplit(fileNode.path) },
+                          ]
                         : []),
                     { label: `Renombrar "${fileNode.name}"`, shortcut: "F2", run: () => uc.renameEntry(fileNode) },
                     ...(!fileNode.isDir
@@ -129,6 +137,23 @@ export function mountExplorer(el: HTMLElement, store: AppStore, uc: UseCases) {
                 "data-flip-id": node.path,
                 "data-parent": parentPath,
                 "aria-expanded": node.isDir ? String(open) : undefined,
+                draggable: node.isDir ? "false" : "true",
+                ondragstart: node.isDir
+                    ? (e: DragEvent) => e.preventDefault()
+                    : (e: DragEvent) => {
+                        beginEditorDrag(node.path, "explorer");
+                        if (e.dataTransfer) {
+                            e.dataTransfer.effectAllowed = "copy";
+                            e.dataTransfer.setData("text/plain", node.path);
+                        }
+                        row.classList.add("dragging");
+                    },
+                ondragend: node.isDir
+                    ? undefined
+                    : () => {
+                        row.classList.remove("dragging");
+                        endEditorDrag();
+                    },
                 onclick: () => {
                     selectedNode = isRoot ? null : node;
                     void (node.isDir ? uc.toggleFolder(node) : uc.openFile(node.path));

@@ -558,22 +558,27 @@ export function animateEditorContentOut(el: HTMLElement): void {
   wrapper.style.overflow = "hidden";
   wrapper.style.pointerEvents = "none";
   wrapper.style.zIndex = "25";
+  wrapper.style.background = "var(--bg)";
+  wrapper.style.borderRadius = "6px";
   wrapper.classList.add("pretty-sync-closing");
   const ghost = el.cloneNode(true) as HTMLElement;
   ghost.style.width = "100%";
   ghost.style.height = "100%";
   wrapper.append(ghost);
   document.body.append(wrapper);
-  const origScroller = el.querySelector(".cm-scroller") as HTMLElement | null;
-  const ghostScroller = ghost.querySelector(".cm-scroller") as HTMLElement | null;
-  if (origScroller && ghostScroller) {
-    ghostScroller.scrollTop = origScroller.scrollTop;
-    ghostScroller.scrollLeft = origScroller.scrollLeft;
+  for (const sel of [".cm-scroller", ".diff-body", ".image-stage"]) {
+    const origScroller = el.querySelector(sel) as HTMLElement | null;
+    const ghostScroller = ghost.querySelector(sel) as HTMLElement | null;
+    if (origScroller && ghostScroller) {
+      ghostScroller.scrollTop = origScroller.scrollTop;
+      ghostScroller.scrollLeft = origScroller.scrollLeft;
+    }
   }
   gsap.to(wrapper, {
     opacity: 0,
-    scale: 0.94,
-    duration: 0.5,
+    scale: 0.96,
+    y: 6,
+    duration: 0.28,
     ease: PRETTY_MODAL_EASE,
     onComplete: () => wrapper.remove(),
   });

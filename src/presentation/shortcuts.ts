@@ -40,8 +40,9 @@ export function registerShortcuts(store: AppStore, uc: UseCases) {
         else if (!e.shiftKey && k === "o") action = uc.openFileDialog;
         else if (e.shiftKey && k === "o") action = uc.openFolder;
         else if (!e.shiftKey && k === "n") action = () => uc.createEntry("file");
-        else if (!e.shiftKey && k === "w") action = () => { const a = store.getState().activePath; if (a) return uc.closeTab(a); };
+        else if (!e.shiftKey && k === "w") action = () => { const st = store.getState(); if (st.activePath) return uc.closeTab(st.activePath, st.activeGroupId); };
         else if (!e.shiftKey && k === "b") action = () => store.dispatch({ type: "sidebar/toggle" });
+        else if (!e.shiftKey && (e.code === "Backslash" || k === "\\")) action = () => uc.splitActiveGroup();
         else if (e.shiftKey && k === "g") action = () => store.dispatch({ type: "git/toggle" });
         else if (!e.shiftKey && (e.code === "Backquote" || k === "ñ")) action = () => store.dispatch({ type: "panel/toggle" });
         else if (!e.shiftKey && k === ",") action = () => store.dispatch({ type: "settings/open", open: true });

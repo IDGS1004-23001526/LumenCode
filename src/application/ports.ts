@@ -26,7 +26,11 @@ export interface EditorPort {
   open(path: string, content: string): void;
   openImage(path: string, url: string, byteSize: number): void;
   openDiff(diff: DiffPayload): void;
-  activate(path: string | null): void;
+  mountGroup(groupId: string, bodyEl: HTMLElement): void;
+  unmountGroup(groupId: string): void;
+  syncGroup(groupId: string, path: string | null, focused: boolean, forceFocus?: boolean): void;
+  setActiveGroup(groupId: string): void;
+  refreshPath(path: string): void;
   revealPosition(path: string, line: number, character: number): void;
   rename(oldPath: string, newPath: string): void;
   close(path: string): void;

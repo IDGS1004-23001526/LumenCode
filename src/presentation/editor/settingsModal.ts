@@ -61,6 +61,7 @@ const SHORTCUTS = [
   ["Ctrl + N", "Nuevo archivo"],
   ["Ctrl + W", "Cerrar pestaña actual"],
   ["Ctrl + B", "Mostrar u ocultar el explorador"],
+  ["Ctrl + \\", "Abrir o cerrar vista dividida (Split Editor)"],
   ["Ctrl + Shift + G", "Mostrar u ocultar el control de versiones"],
   ["Ctrl + `", "Mostrar u ocultar la terminal"],
   ["Ctrl + +", "Aumentar tamaño de fuente"],
@@ -704,7 +705,7 @@ export function mountSettingsModal(store: AppStore) {
                 "div",
                 { class: "credits-title-row" },
                 h("span", { class: "credits-name" }, "LumenCode"),
-                h("span", { class: "credits-pill" }, "v0.2.1"),
+                h("span", { class: "credits-pill" }, "v0.5.0"),
               ),
               h(
                 "div",

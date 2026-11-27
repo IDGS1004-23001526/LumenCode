@@ -15,13 +15,13 @@ import { createSmartCompletionSource } from "./smartCompletion";
 import { createPasteIndentExtension } from "./pasteIndent";
 import { errorLensExtension, lspDiagnosticsToLumen, setDiagnosticsEffect, type LumenDiagnostic } from "./errorLens";
 import { animateEditorContentIn, animateEditorContentOut } from "../animate";
+import { h } from "../dom";
 import { createDiffPreviewHost } from "./diffViewer";
 import { createGitConflictExtension } from "./gitConflicts";
 import { closeGitPeek, createGitGutterExtension, requestGitGutterRefreshEffect } from "./gitGutter";
 import { createImagePreviewHost, type ImageEntry } from "./imagePreview";
 
 import type { EditorPort } from "../../application/ports";
-// import { languageFor } from "./languages";
 import { createLumenTheme, lumenHighlight } from "./theme";
 import { languageFor } from "./languages";
 
@@ -233,13 +233,27 @@ const elasticOverscroll = ViewPlugin.fromClass(
     },
 );
 
-/** Un EdtorView y un EditorState por pestaña osea conserva cursor e historial */
-export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks): EditorPort {
+/** Pool dinámico de instancias EditorView por EditorGroupId, con un EditorState por archivo y sincronización en vivo */
+export function createCodeMirrorEditor(cb: EditorCallbacks): EditorPort {
     const states = new Map<string, EditorState>();
     const fileIndents = new Map<string, DetectedIndent>();
     const scrollPositions = new Map<string, { top: number; left: number }>();
-    let active: string | null = null;
-    let activateGen = 0;
+    const images = new Map<string, ImageEntry>();
+    const diffs = new Map<string, DiffPayload>();
+
+    interface PaneCtx {
+        groupId: string;
+        host: HTMLElement;
+        view: EditorView;
+        imageViewer: ReturnType<typeof createImagePreviewHost>;
+        diffViewer: ReturnType<typeof createDiffPreviewHost>;
+        path: string | null;
+        activateGen: number;
+    }
+
+    const panes = new Map<string, PaneCtx>();
+    let activeGroupId = "group-1";
+    let isSyncing = false;
     let currentTabSize = 4;
     let currentWordWrap = false;
     let currentDark = false;
@@ -253,15 +267,43 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
     const themeConf = new Compartment();
 
     let empty = EditorState.create({
-        extensions: [themeConf.of(createLumenTheme(currentDark)), EditorView.editable.of(false), 
-            placeholder("Abre un archivo desde el explorador ó Ctrl + O abre una carpeta")],
+        extensions: [
+            themeConf.of(createLumenTheme(currentDark)),
+            EditorView.editable.of(false),
+            placeholder("Abre un archivo desde el explorador ó Ctrl + O abre una carpeta"),
+        ],
     });
+
+    const scrollKey = (groupId: string, path: string) => `${groupId}::${path}`;
+    const isTextBuffer = (path: string | null): path is string =>
+        Boolean(path && states.has(path) && !images.has(path) && !diffs.has(path));
+
+    const isVisiblePath = (path: string) => {
+        for (const p of panes.values()) {
+            if (p.path === path) return true;
+        }
+        return false;
+    };
+
+    const findPaneByView = (view: EditorView): PaneCtx | null => {
+        for (const p of panes.values()) {
+            if (p.view === view) return p;
+        }
+        return null;
+    };
+
+    const findOtherPaneWithPath = (excludeGroupId: string, path: string): PaneCtx | null => {
+        for (const p of panes.values()) {
+            if (p.groupId !== excludeGroupId && p.path === path) return p;
+        }
+        return null;
+    };
 
     const build = (path: string, doc: string) => {
         const detected = detectFileIndentation(doc, currentTabSize);
         fileIndents.set(path, detected);
         const smartSource = createSmartCompletionSource(cb.getIndex, () => path, cb.getAssetFiles);
-        const lspSource = createLspCompletionSource(cb.getIndex, () => active);
+        const lspSource = createLspCompletionSource(cb.getIndex, () => path);
         const emmetSource = createHtmlEmmetCompletionSource(() => path);
 
         // Fuente local sincrona (< 1 ms): nunca espera al LSP para mostrar auto-imports ni Emmet
@@ -302,7 +344,7 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
                 createGitGutterExtension({
                     getPath: () => path,
                     getRepoRoot: () => cb.getGitRoot?.() ?? cb.getRootPath(),
-                    isActiveTab: () => active === path,
+                    isActiveTab: () => isVisiblePath(path),
                     onGitMutated: cb.onGitMutated,
                 }),
                 createGitConflictExtension(() => path, cb.onOpenDiff),
@@ -329,9 +371,9 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
                     defaultKeymap: true,
                     override: [fastLocalSource, asyncLspSource],
                 }),
-                createLspHoverExtension(() => active),
+                createLspHoverExtension(() => path),
                 createLspDefinitionExtension({
-                    getActivePath: () => active,
+                    getActivePath: () => path,
                     getIndex: cb.getIndex,
                     readText: cb.readText,
                     onNavigate: cb.onNavigate,
@@ -350,43 +392,164 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
                 syntaxHighlighting(lumenHighlight),
                 languageFor(path).support,
                 EditorView.updateListener.of((u) => {
-                    if (u.docChanged && active === path && states.has(path)) {
-                        const text = u.state.doc.toString();
-                        cb.onChange(path, text);
-                        lspClient.changeDocument(path, text);
+                    if (!u.docChanged || isSyncing) return;
+                    const owner = findPaneByView(u.view);
+                    if (!owner || owner.path !== path || !states.has(path)) return;
+                    states.set(path, u.state);
+                    const text = u.state.doc.toString();
+                    cb.onChange(path, text);
+                    lspClient.changeDocument(path, text);
+
+                    // Sincroniza cambios hacia todos los demás grupos que tengan el mismo archivo abierto
+                    for (const other of panes.values()) {
+                        if (other === owner || other.path !== path || !isTextBuffer(path)) continue;
+                        isSyncing = true;
+                        try {
+                            other.view.dispatch({ changes: u.changes });
+                        } finally {
+                            isSyncing = false;
+                        }
                     }
                 }),
             ],
         });
     };
 
-    const view = new EditorView({ parent, state: empty });
-    const images = new Map<string, ImageEntry>();
-    const imageViewer = createImagePreviewHost(parent);
-    const diffs = new Map<string, DiffPayload>();
-    const diffViewer = createDiffPreviewHost(parent, {
-        onMutated: cb.onDiffMutated,
-        confirmRevert: cb.confirmAction,
-        onError: cb.onError,
-    });
+    const savePaneState = (pane: PaneCtx) => {
+        if (isTextBuffer(pane.path)) {
+            states.set(pane.path, pane.view.state);
+            scrollPositions.set(scrollKey(pane.groupId, pane.path), {
+                top: pane.view.scrollDOM.scrollTop,
+                left: pane.view.scrollDOM.scrollLeft,
+            });
+        }
+    };
 
-    lspClient.onDiagnostics((diagPath, lspDiags) => {
-        if (diagPath === active && isTextBuffer(diagPath)) {
-            const lumenDiags = lspDiagnosticsToLumen(view.state.doc, lspDiags);
-            view.dispatch({ effects: setDiagnosticsEffect.of(lumenDiags) });
-            cb.onDiagnostics?.(diagPath, lumenDiags);
-        } else {
-            const st = states.get(diagPath);
-            if (st) {
-                const lumenDiags = lspDiagnosticsToLumen(st.doc, lspDiags);
-                states.set(diagPath, st.update({ effects: setDiagnosticsEffect.of(lumenDiags) }).state);
-                cb.onDiagnostics?.(diagPath, lumenDiags);
+    const animatePaneOutgoing = (pane: PaneCtx, path: string | null) => {
+        if (!path || !pane.host.isConnected) return;
+        const outgoing = images.has(path)
+            ? (pane.host.querySelector(".image-viewer") as HTMLElement | null)
+            : diffs.has(path)
+                ? (pane.host.querySelector(".diff-viewer") as HTMLElement | null)
+                : pane.view.dom;
+        if (outgoing && !outgoing.hidden) animateEditorContentOut(outgoing);
+    };
+
+    const showInPane = (pane: PaneCtx, path: string | null, shouldFocus: boolean, forceRefresh = false) => {
+        const prevPath = pane.path;
+        if (prevPath === path && !forceRefresh) {
+            if (shouldFocus && isTextBuffer(path) && !pane.host.contains(document.activeElement)) {
+                pane.view.contentDOM.focus({ preventScroll: true });
+            }
+            return;
+        }
+
+        if (prevPath !== path) {
+            closeGitPeek();
+            savePaneState(pane);
+            animatePaneOutgoing(pane, prevPath);
+        }
+
+        pane.path = path;
+        const gen = ++pane.activateGen;
+
+        const img = path ? images.get(path) : undefined;
+        if (img) {
+            pane.diffViewer.hide();
+            pane.view.dom.hidden = true;
+            pane.view.setState(empty);
+            pane.imageViewer.show(img);
+            const viewerEl = pane.host.querySelector(".image-viewer") as HTMLElement | null;
+            if (viewerEl && prevPath !== path) animateEditorContentIn(viewerEl);
+            return;
+        }
+
+        const diff = path ? diffs.get(path) : undefined;
+        if (diff) {
+            pane.imageViewer.hide();
+            pane.view.dom.hidden = true;
+            pane.view.setState(empty);
+            pane.diffViewer.show(diff);
+            const diffEl = pane.host.querySelector(".diff-viewer") as HTMLElement | null;
+            if (diffEl && prevPath !== path) animateEditorContentIn(diffEl);
+            return;
+        }
+
+        pane.imageViewer.hide();
+        pane.diffViewer.hide();
+        pane.view.dom.hidden = false;
+
+        let next: EditorState | undefined;
+        if (path && states.has(path)) {
+            const other = findOtherPaneWithPath(pane.groupId, path);
+            if (other && isTextBuffer(path)) {
+                // Mismo archivo abierto en otro grupo: estado independiente sincronizado en vivo
+                next = build(path, other.view.state.doc.toString());
+            } else {
+                next = states.get(path);
             }
         }
-    });
 
-    const isTextBuffer = (path: string | null): path is string =>
-        Boolean(path && states.has(path) && !images.has(path) && !diffs.has(path));
+        const savedScroll = path
+            ? (scrollPositions.get(scrollKey(pane.groupId, path)) ?? { top: 0, left: 0 })
+            : { top: 0, left: 0 };
+
+        pane.view.setState(next ?? empty);
+        if (path && next) {
+            pane.view.dispatch({ effects: requestGitGutterRefreshEffect.of(undefined) });
+        }
+
+        const restoreScroll = () => {
+            if (pane.path !== path || pane.activateGen !== gen) return;
+            pane.view.scrollDOM.scrollTop = savedScroll.top;
+            pane.view.scrollDOM.scrollLeft = savedScroll.left;
+        };
+        restoreScroll();
+        if (prevPath !== path) animateEditorContentIn(pane.view.dom);
+        if (next) {
+            if (shouldFocus && !pane.host.contains(document.activeElement)) {
+                pane.view.contentDOM.focus({ preventScroll: true });
+            }
+            requestAnimationFrame(() => {
+                restoreScroll();
+                pane.view.requestMeasure();
+            });
+        }
+    };
+
+    const updateIndentForFocused = () => {
+        const fp = panes.get(activeGroupId)?.path ?? null;
+        if (fp && isTextBuffer(fp)) {
+            cb.onIndentChange?.(fileIndents.get(fp)?.label ?? `Espacios: ${currentTabSize}`);
+        } else {
+            cb.onIndentChange?.(`Espacios: ${currentTabSize}`);
+        }
+    };
+
+    lspClient.onDiagnostics((diagPath, lspDiags) => {
+        if (!isTextBuffer(diagPath)) return;
+        let dispatched = false;
+        let lastLumenDiags: LumenDiagnostic[] | null = null;
+        for (const pane of panes.values()) {
+            if (pane.path === diagPath) {
+                const lumenDiags = lspDiagnosticsToLumen(pane.view.state.doc, lspDiags);
+                pane.view.dispatch({ effects: setDiagnosticsEffect.of(lumenDiags) });
+                states.set(diagPath, pane.view.state);
+                lastLumenDiags = lumenDiags;
+                dispatched = true;
+            }
+        }
+        if (dispatched && lastLumenDiags) {
+            cb.onDiagnostics?.(diagPath, lastLumenDiags);
+            return;
+        }
+        const st = states.get(diagPath);
+        if (st) {
+            const lumenDiags = lspDiagnosticsToLumen(st.doc, lspDiags);
+            states.set(diagPath, st.update({ effects: setDiagnosticsEffect.of(lumenDiags) }).state);
+            cb.onDiagnostics?.(diagPath, lumenDiags);
+        }
+    });
 
     return {
         open(path, content) {
@@ -401,75 +564,64 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
         openDiff(diff) {
             diffs.set(diff.id, diff);
         },
-        activate(path) {
-            closeGitPeek();
-            const prevActive = active;
-            if (isTextBuffer(active) && active !== path) {
-                states.set(active, view.state);
-                scrollPositions.set(active, {
-                    top: view.scrollDOM.scrollTop,
-                    left: view.scrollDOM.scrollLeft,
-                });
-            }
-            if (prevActive && prevActive !== path) {
-                const outgoing = images.has(prevActive)
-                    ? (parent.querySelector(".image-viewer") as HTMLElement | null)
-                    : diffs.has(prevActive)
-                        ? (parent.querySelector(".diff-viewer") as HTMLElement | null)
-                        : view.dom;
-                if (outgoing && !outgoing.hidden) animateEditorContentOut(outgoing);
-            }
-            active = path;
-            const gen = ++activateGen;
-
-            const img = path ? images.get(path) : undefined;
-            if (img) {
-                diffViewer.hide();
-                view.dom.hidden = true;
-                view.setState(empty);
-                imageViewer.show(img);
-                const viewerEl = parent.querySelector(".image-viewer") as HTMLElement | null;
-                if (viewerEl && prevActive !== path) animateEditorContentIn(viewerEl);
+        mountGroup(groupId, bodyEl) {
+            const existing = panes.get(groupId);
+            if (existing) {
+                if (existing.host.parentElement !== bodyEl) {
+                    bodyEl.appendChild(existing.host);
+                    requestAnimationFrame(() => existing.view.requestMeasure());
+                }
                 return;
             }
-
-            const diff = path ? diffs.get(path) : undefined;
-            if (diff) {
-                imageViewer.hide();
-                view.dom.hidden = true;
-                view.setState(empty);
-                diffViewer.show(diff);
-                const diffEl = parent.querySelector(".diff-viewer") as HTMLElement | null;
-                if (diffEl && prevActive !== path) animateEditorContentIn(diffEl);
-                return;
+            const host = h("div", { class: "pane-surface" });
+            const view = new EditorView({ parent: host, state: empty });
+            const imageViewer = createImagePreviewHost(host);
+            const diffViewer = createDiffPreviewHost(host, {
+                onMutated: cb.onDiffMutated,
+                confirmRevert: cb.confirmAction,
+                onError: cb.onError,
+            });
+            bodyEl.appendChild(host);
+            panes.set(groupId, {
+                groupId,
+                host,
+                view,
+                imageViewer,
+                diffViewer,
+                path: null,
+                activateGen: 0,
+            });
+        },
+        unmountGroup(groupId) {
+            const pane = panes.get(groupId);
+            if (!pane) return;
+            animatePaneOutgoing(pane, pane.path);
+            savePaneState(pane);
+            pane.view.destroy();
+            pane.host.remove();
+            panes.delete(groupId);
+            for (const key of [...scrollPositions.keys()]) {
+                if (key.startsWith(`${groupId}::`)) scrollPositions.delete(key);
             }
-
-            imageViewer.hide();
-            diffViewer.hide();
-            view.dom.hidden = false;
-            const next = path ? states.get(path) : undefined;
-            const savedScroll = path ? (scrollPositions.get(path) ?? { top: 0, left: 0 }) : { top: 0, left: 0 };
-            view.setState(next ?? empty);
-            if (path && next) {
-                cb.onIndentChange?.(fileIndents.get(path)?.label ?? `Espacios: ${currentTabSize}`);
-                view.dispatch({ effects: requestGitGutterRefreshEffect.of(undefined) });
-            } else {
-                cb.onIndentChange?.(`Espacios: ${currentTabSize}`);
+        },
+        syncGroup(groupId, path, focused, forceFocus = false) {
+            const pane = panes.get(groupId);
+            if (!pane) return;
+            showInPane(pane, path, focused && forceFocus, false);
+            if (focused) {
+                activeGroupId = groupId;
+                updateIndentForFocused();
             }
-
-            const restoreScroll = () => {
-                if (active !== path || activateGen !== gen) return;
-                view.scrollDOM.scrollTop = savedScroll.top;
-                view.scrollDOM.scrollLeft = savedScroll.left;
-            };
-            restoreScroll();
-            if (prevActive !== path) animateEditorContentIn(view.dom);
-            if (next) {
-                view.contentDOM.focus({ preventScroll: true });
-                requestAnimationFrame(() => {
-                    restoreScroll();
-                    view.requestMeasure();
-                });
+        },
+        setActiveGroup(groupId) {
+            activeGroupId = groupId;
+            updateIndentForFocused();
+        },
+        refreshPath(path) {
+            for (const pane of panes.values()) {
+                if (pane.path === path) {
+                    showInPane(pane, path, false, true);
+                }
             }
         },
         configure(opts) {
@@ -520,40 +672,47 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
                 empty = empty.update({ effects: themeConf.reconfigure(createLumenTheme(currentDark)) }).state;
             }
 
-            if (active && !images.has(active) && !diffs.has(active) && states.has(active)) {
-                const effs = buildEffectsFor(active);
-                if (effs.length > 0) {
-                    view.dispatch({ effects: effs });
-                    states.set(active, view.state);
+            const updatedPaths = new Set<string>();
+            for (const pane of panes.values()) {
+                if (isTextBuffer(pane.path)) {
+                    const effs = buildEffectsFor(pane.path);
+                    if (effs.length > 0) {
+                        pane.view.dispatch({ effects: effs });
+                        states.set(pane.path, pane.view.state);
+                    }
+                    updatedPaths.add(pane.path);
+                } else if (darkChanged && !pane.path) {
+                    pane.view.setState(empty);
                 }
-            } else if (darkChanged && !active) {
-                view.setState(empty);
             }
+
             for (const [p, st] of states) {
-                if (p === active) continue;
+                if (updatedPaths.has(p)) continue;
                 const effs = buildEffectsFor(p);
                 if (effs.length > 0) {
                     states.set(p, st.update({ effects: effs }).state);
                 }
             }
 
-            if (tabChanged) {
-                const activeLabel = active ? fileIndents.get(active)?.label : undefined;
-                cb.onIndentChange?.(activeLabel ?? `Espacios: ${opts.tabSize}`);
-            }
+            if (tabChanged) updateIndentForFocused();
         },
         revealPosition(path, line, character) {
-            if (!active || !pathsEqual(active, path) || !isTextBuffer(active)) return;
-            activateGen++;
-            const doc = view.state.doc;
+            const activePane = panes.get(activeGroupId);
+            const candidates: PaneCtx[] = activePane
+                ? [activePane, ...[...panes.values()].filter((p) => p !== activePane)]
+                : [...panes.values()];
+            const pane = candidates.find((p) => p.path && pathsEqual(p.path, path) && isTextBuffer(p.path));
+            if (!pane) return;
+            pane.activateGen++;
+            const doc = pane.view.state.doc;
             const lineNum = Math.max(1, Math.min(doc.lines, line + 1));
             const docLine = doc.line(lineNum);
             const pos = Math.min(docLine.to, docLine.from + Math.max(0, character));
-            view.dispatch({
+            pane.view.dispatch({
                 selection: EditorSelection.cursor(pos),
                 effects: EditorView.scrollIntoView(pos, { y: "center" }),
             });
-            view.focus();
+            pane.view.focus();
         },
         rename(oldPath, newPath) {
             const img = images.get(oldPath);
@@ -561,15 +720,19 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
                 const updated: ImageEntry = { ...img, path: newPath };
                 images.delete(oldPath);
                 images.set(newPath, updated);
-                if (active === oldPath) {
-                    active = newPath;
-                    imageViewer.show(updated);
+                for (const pane of panes.values()) {
+                    if (pane.path === oldPath) {
+                        pane.path = newPath;
+                        pane.imageViewer.show(updated);
+                    }
                 }
                 return;
             }
 
-            const isActive = active === oldPath;
-            const prevState = isActive ? view.state : states.get(oldPath);
+            const activeHolder =
+                (panes.get(activeGroupId)?.path === oldPath ? panes.get(activeGroupId) : null) ??
+                [...panes.values()].find((p) => p.path === oldPath);
+            const prevState = activeHolder ? activeHolder.view.state : states.get(oldPath);
             if (!prevState) return;
 
             const content = prevState.doc.toString();
@@ -581,51 +744,77 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
             const indent = fileIndents.get(oldPath);
             fileIndents.delete(oldPath);
             if (indent) fileIndents.set(newPath, indent);
-            const savedScroll = isActive
-                ? { top: view.scrollDOM.scrollTop, left: view.scrollDOM.scrollLeft }
-                : scrollPositions.get(oldPath);
-            scrollPositions.delete(oldPath);
-            if (savedScroll) scrollPositions.set(newPath, savedScroll);
+
+            for (const pane of panes.values()) {
+                const oldKey = scrollKey(pane.groupId, oldPath);
+                const newKey = scrollKey(pane.groupId, newPath);
+                const saved = pane.path === oldPath
+                    ? { top: pane.view.scrollDOM.scrollTop, left: pane.view.scrollDOM.scrollLeft }
+                    : scrollPositions.get(oldKey);
+                scrollPositions.delete(oldKey);
+                if (saved) scrollPositions.set(newKey, saved);
+            }
+
             cb.onDiagnostics?.(oldPath, []);
             lspClient.closeDocument(oldPath);
             void lspClient.openDocument(newPath, content, cb.getRootPath());
 
-            if (isActive) {
-                active = newPath;
-                view.setState(rebuilt);
-                if (savedScroll) {
-                    view.scrollDOM.scrollTop = savedScroll.top;
-                    view.scrollDOM.scrollLeft = savedScroll.left;
+            for (const pane of panes.values()) {
+                if (pane.path !== oldPath) continue;
+                pane.path = newPath;
+                const paneSel = pane.view.state.selection;
+                const nextState = pane === activeHolder
+                    ? rebuilt
+                    : build(newPath, content).update({ selection: paneSel }).state;
+                pane.view.setState(nextState);
+                const saved = scrollPositions.get(scrollKey(pane.groupId, newPath));
+                if (saved) {
+                    pane.view.scrollDOM.scrollTop = saved.top;
+                    pane.view.scrollDOM.scrollLeft = saved.left;
                 }
             }
         },
         close(path) {
             const img = images.get(path);
             if (img) {
-                URL.revokeObjectURL(img.url);
-                images.delete(path);
-                if (active === path) {
-                    active = null;
-                    imageViewer.hide();
-                    view.dom.hidden = false;
+                let animated = false;
+                for (const pane of panes.values()) {
+                    if (pane.path === path) {
+                        animatePaneOutgoing(pane, path);
+                        animated = true;
+                        pane.path = null;
+                        pane.imageViewer.hide();
+                        pane.view.dom.hidden = false;
+                    }
                 }
+                images.delete(path);
+                if (animated) setTimeout(() => URL.revokeObjectURL(img.url), 350);
+                else URL.revokeObjectURL(img.url);
                 return;
             }
             if (diffs.has(path)) {
-                diffs.delete(path);
-                if (active === path) {
-                    active = null;
-                    diffViewer.hide();
-                    view.dom.hidden = false;
+                for (const pane of panes.values()) {
+                    if (pane.path === path) {
+                        animatePaneOutgoing(pane, path);
+                        pane.path = null;
+                        pane.diffViewer.hide();
+                        pane.view.dom.hidden = false;
+                    }
                 }
+                diffs.delete(path);
                 return;
+            }
+            for (const pane of panes.values()) {
+                if (pane.path === path) {
+                    animatePaneOutgoing(pane, path);
+                    pane.path = null;
+                    pane.view.setState(empty);
+                }
             }
             states.delete(path);
             fileIndents.delete(path);
-            scrollPositions.delete(path);
-            if (active === path) {
-                active = null;
-                view.setState(empty);
+            for (const key of [...scrollPositions.keys()]) {
+                if (key.endsWith(`::${path}`)) scrollPositions.delete(key);
             }
             lspClient.closeDocument(path);
         },
@@ -634,23 +823,42 @@ export function createCodeMirrorEditor(parent: HTMLElement, cb: EditorCallbacks)
         },
         getText(path) {
             if (!isTextBuffer(path)) return "";
-            const state = path === active ? view.state : states.get(path);
-            return state?.doc.toString() ?? "";
+            const activePane = panes.get(activeGroupId);
+            if (activePane?.path === path) return activePane.view.state.doc.toString();
+            for (const pane of panes.values()) {
+                if (pane.path === path) return pane.view.state.doc.toString();
+            }
+            return states.get(path)?.doc.toString() ?? "";
         },
         setText(path, content) {
             if (!isTextBuffer(path)) return;
-            if (path === active) {
-                view.dispatch({
-                    changes: { from: 0, to: view.state.doc.length, insert: content },
-                });
-                states.set(path, view.state);
-                return;
+            let updatedVisible = false;
+            isSyncing = true;
+            try {
+                for (const pane of panes.values()) {
+                    if (pane.path === path) {
+                        pane.view.dispatch({
+                            changes: { from: 0, to: pane.view.state.doc.length, insert: content },
+                        });
+                        states.set(path, pane.view.state);
+                        updatedVisible = true;
+                    }
+                }
+            } finally {
+                isSyncing = false;
             }
-            states.set(path, build(path, content));
+            if (!updatedVisible) {
+                states.set(path, build(path, content));
+            }
             lspClient.changeDocument(path, content);
         },
-        focus: () => view.focus(),
-        remeasure: () => view.requestMeasure(),
+        focus: () => {
+            const target = panes.get(activeGroupId) ?? panes.values().next().value;
+            target?.view.focus();
+        },
+        remeasure: () => {
+            for (const pane of panes.values()) pane.view.requestMeasure();
+        },
     };
 }
 

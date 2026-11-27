@@ -1,5 +1,6 @@
 import type { DiffPayload, GitCommitFile, GitFileStatus } from "../domain/git";
-import type { FileNode } from "../domain/types";
+import type { DropZone, FileNode } from "../domain/types";
+import { getAllGroups, getVisiblePaths } from "../domain/editorLayout";
 import { hasFileExtension, imageMimeFor, isImageFile, isTextFile, isValidName, joinPath, normalizePath, parentDirOf, pathsEqual } from "../domain/path";
 import { gitClient } from "../infraestructure/gitClient";
 import type { AppStore } from "./reducer";
@@ -77,7 +78,7 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
         if (!afterExists || afterExists.dirty) continue;
         if (!exists) {
           editor.close(tab.path);
-          store.dispatch({ type: "tab/close", path: tab.path });
+          store.dispatch({ type: "tab/close", path: tab.path, allGroups: true });
           continue;
         }
         const disk = await fs.readText(tab.path);
@@ -110,12 +111,10 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
     store.dispatch({ type: "tree/setExpanded", path: node.path, expanded: !isOpen });
   }
 
-  async function openFile(path: string): Promise<string | null> {
+  async function ensureFileLoaded(path: string): Promise<string | null> {
     const existing = findOpenTab(path);
-    if (existing) {
-      store.dispatch({ type: "tab/activate", path: existing.path }); // ya abierto → foco
-      return existing.path;
-    }
+    if (existing) return existing.path;
+
     const norm = normalizePath(path);
     const lockKey = /^[A-Z]:\\/.test(norm) ? norm.toLowerCase() : norm;
     const pending = inFlightOpens.get(lockKey);
@@ -123,17 +122,14 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
 
     const op = (async (): Promise<string | null> => {
       const recheck = findOpenTab(path);
-      if (recheck) {
-        store.dispatch({ type: "tab/activate", path: recheck.path });
-        return recheck.path;
-      }
+      if (recheck) return recheck.path;
+
       if (isImageFile(path)) {
         try {
           const bytes = await fs.readBinary(path);
           const blob = new Blob([new Uint8Array(bytes)], { type: imageMimeFor(path) });
           const url = URL.createObjectURL(blob);
           editor.openImage(path, url, bytes.byteLength);
-          store.dispatch({ type: "tab/open", path });
           return path;
         } catch (e) {
           await dialogs.error(`No se pudo abrir la imagen.\n\n${String(e)}`);
@@ -151,7 +147,6 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
         if (indexer.index.files.size <= 1) {
           void indexer.scanDirectory(parentDirOf(path));
         }
-        store.dispatch({ type: "tab/open", path });
         return path;
       } catch (e) {
         await dialogs.error(`No se pudo abrir el archivo.\n\n${String(e)}`);
@@ -167,6 +162,36 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
     }
   }
 
+  async function openFile(path: string, groupId?: string): Promise<string | null> {
+    const loaded = await ensureFileLoaded(path);
+    if (!loaded) return null;
+    store.dispatch({ type: "tab/open", path: loaded, groupId });
+    return loaded;
+  }
+
+  async function openFileInSplit(path: string, groupId?: string): Promise<string | null> {
+    const loaded = await ensureFileLoaded(path);
+    if (!loaded) return null;
+    store.dispatch({ type: "group/split", groupId, path: loaded });
+    return loaded;
+  }
+
+  async function dropFileInGroup(
+    path: string,
+    targetGroupId: string,
+    zone: DropZone,
+    sourceGroupId?: string,
+  ): Promise<string | null> {
+    const loaded = await ensureFileLoaded(path);
+    if (!loaded) return null;
+    store.dispatch({ type: "group/drop", targetGroupId, zone, path: loaded, sourceGroupId });
+    return loaded;
+  }
+
+  function splitActiveGroup(groupId?: string) {
+    store.dispatch({ type: "group/split", groupId });
+  }
+
   async function openFileAt(path: string, line: number, character: number) {
     const openedPath = await openFile(path);
     if (openedPath) {
@@ -174,13 +199,21 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
     }
   }
 
-  async function closeTab(path: string) {
+  async function closeTab(path: string, groupId?: string) {
     const tab = st().tabs.find((t) => t.path === path);
     if (!tab) return;
-    if (tab.dirty && !(await dialogs.confirm(`"${tab.name}" tiene cambios sin guardar. ¿Cerrar y descartarlos?`))) return;
-    editor.close(path);
-    store.dispatch({ type: "tab/close", path });
-    if (tab.dirty) scheduleIndexRefresh();
+    const targetGroupId = groupId ?? st().activeGroupId;
+    const openElsewhere = getAllGroups(st().editorLayout).some(
+      (g) => g.id !== targetGroupId && g.tabs.includes(path),
+    );
+    if (!openElsewhere && tab.dirty) {
+      if (!(await dialogs.confirm(`"${tab.name}" tiene cambios sin guardar. ¿Cerrar y descartarlos?`))) return;
+    }
+    if (!openElsewhere) {
+      editor.close(path);
+    }
+    store.dispatch({ type: "tab/close", path, groupId: targetGroupId });
+    if (!openElsewhere && tab.dirty) scheduleIndexRefresh();
   }
 
   async function saveActive() {
@@ -223,20 +256,26 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
       await fs.writeText(target, content);
 
       const oldTab = st().tabs.find((t) => t.path === path);
-      // Cierra la pestaña original sin preguntar: su contenido ya se guardó en la nueva ruta.
-      editor.close(path);
-      store.dispatch({ type: "tab/close", path });
+      const activeGroupId = st().activeGroupId;
 
+      // Abrimos/activamos el archivo destino antes de cerrar el original para preservar el grupo actual.
       if (existingTarget) {
         editor.setText(existingTarget.path, content);
         indexer.updateFile(existingTarget.path, content);
         store.dispatch({ type: "tab/dirty", path: existingTarget.path, dirty: false });
-        store.dispatch({ type: "tab/activate", path: existingTarget.path });
+        store.dispatch({ type: "tab/open", path: existingTarget.path, groupId: activeGroupId });
       } else {
         editor.open(target, content);
         indexer.updateFile(target, content);
-        store.dispatch({ type: "tab/open", path: target });
+        store.dispatch({ type: "tab/open", path: target, groupId: activeGroupId });
       }
+
+      // Cierra la pestaña original en el grupo actual; solo destruye el buffer si no sigue abierta en otro grupo.
+      const openElsewhere = getAllGroups(st().editorLayout).some(
+        (g) => g.id !== activeGroupId && g.tabs.includes(path),
+      );
+      if (!openElsewhere) editor.close(path);
+      store.dispatch({ type: "tab/close", path, groupId: activeGroupId });
 
       // La ruta anterior sigue en disco: se reindexa para descartar el buffer antiguo.
       if (oldTab?.dirty) scheduleIndexRefresh();
@@ -295,10 +334,10 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
       return dialogs.error(`No se pudo eliminar el archivo \n\n${String(e)}`);
     }
 
-    // Si el archivo eliminado estaba abierto en una pestaña, la cerramos
+    // Si el archivo eliminado estaba abierto en alguna pestaña, la cerramos en todos los grupos
     if (st().tabs.some((t) => t.path === node.path)) {
       editor.close(node.path);
-      store.dispatch({ type: "tab/close", path: node.path });
+      store.dispatch({ type: "tab/close", path: node.path, allGroups: true });
     }
 
     await refresh();
@@ -462,14 +501,14 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
       if (openTab) {
         if (isUntracked || !(await fs.exists(openTab.path))) {
           editor.close(openTab.path);
-          store.dispatch({ type: "tab/close", path: openTab.path });
+          store.dispatch({ type: "tab/close", path: openTab.path, allGroups: true });
         } else if (isImageFile(openTab.path)) {
           try {
             const bytes = await fs.readBinary(openTab.path);
             const blob = new Blob([new Uint8Array(bytes)], { type: imageMimeFor(openTab.path) });
             const url = URL.createObjectURL(blob);
             editor.openImage(openTab.path, url, bytes.byteLength);
-            if (st().activePath === openTab.path) editor.activate(openTab.path);
+            editor.refreshPath(openTab.path);
           } catch {
             // Mantiene la vista previa actual ante fallos transitorios de lectura
           }
@@ -641,9 +680,9 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
 
   function openDiffTab(diff: DiffPayload) {
     editor.openDiff(diff);
-    const alreadyActive = st().activePath === diff.id;
+    const alreadyVisible = getVisiblePaths(st().editorLayout).includes(diff.id);
     store.dispatch({ type: "tab/open", path: diff.id });
-    if (alreadyActive) editor.activate(diff.id);
+    if (alreadyVisible) editor.refreshPath(diff.id);
   }
 
   async function gitAddToGitignore(relPath: string) {
@@ -663,7 +702,7 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
     if (touchedDisk && openTab && editor.isEditable(openTab.path)) {
       if (!(await fs.exists(openTab.path))) {
         editor.close(openTab.path);
-        store.dispatch({ type: "tab/close", path: openTab.path });
+        store.dispatch({ type: "tab/close", path: openTab.path, allGroups: true });
       } else {
         try {
           const disk = await fs.readText(openTab.path);
@@ -674,11 +713,12 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
         }
       }
     }
-    const active = st().activePath;
+    const visiblePaths = new Set(getVisiblePaths(st().editorLayout));
     const expectedWorking = `git-diff://working/${relPath}`;
     const expectedStaged = `git-diff://staged/${relPath}`;
-    if (active === expectedWorking || active === expectedStaged) {
-      const mode = active === expectedStaged ? "staged" : "working";
+    for (const visiblePath of visiblePaths) {
+      if (visiblePath !== expectedWorking && visiblePath !== expectedStaged) continue;
+      const mode = visiblePath === expectedStaged ? "staged" : "working";
       const leftRef = mode === "staged" ? "HEAD" : ":0";
       const leftText = await gitClient.showFile(repoPath, leftRef, relPath).catch(() => "");
       const rightText = mode === "staged"
@@ -687,7 +727,7 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
           ? editor.getText(openTab.path)
           : await fs.readText(fullPath).catch(() => "");
       editor.openDiff({
-        id: active,
+        id: visiblePath,
         title: `${relPath} (${mode === "staged" ? "Staged" : "Working Tree"})`,
         relPath,
         repoRoot: repoPath,
@@ -697,7 +737,7 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
         rightText,
         mode,
       });
-      editor.activate(active);
+      editor.refreshPath(visiblePath);
     }
     await refreshGit();
   }
@@ -708,6 +748,9 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
     refresh,
     toggleFolder,
     openFile,
+    openFileInSplit,
+    dropFileInGroup,
+    splitActiveGroup,
     openFileAt,
     closeTab,
     saveActive,
