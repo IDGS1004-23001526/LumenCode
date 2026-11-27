@@ -16,7 +16,27 @@ export interface Tab {
 }
 
 export type PanelView = "problems" | "output" | "debug" | "terminal";
-export type CursorBlinking = "blink" | "smooth" | "phase" | "expand" | "solid"; 
+export type CursorBlinking = "blink" | "smooth" | "phase" | "expand" | "solid";
+export type SplitDirection = "vertical" | "horizontal";
+export type DropZone = "left" | "right" | "top" | "bottom" | "center";
+
+export interface EditorGroupNode {
+    kind: "group";
+    id: string;
+    tabs: string[];
+    activePath: string | null;
+}
+
+export interface SplitContainerNode {
+    kind: "split";
+    id: string;
+    direction: SplitDirection;
+    ratio: number;
+    first: LayoutNode;
+    second: LayoutNode;
+}
+
+export type LayoutNode = EditorGroupNode | SplitContainerNode;
 
 export interface ThemeManifest {
     id: string;
@@ -78,6 +98,8 @@ export interface AppState {
     expanded: ReadonlySet<string>;
     tabs: Tab[];
     activePath: string | null;
+    editorLayout: LayoutNode;
+    activeGroupId: string;
     sidebarVisible: boolean;
     gitOpen: boolean;
     panelVisible: boolean;

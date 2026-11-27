@@ -19,12 +19,22 @@ fn kill_terminal_pid(pid: u32) {
         let _ = Command::new("taskkill")
             .args(["/F", "/T", "/PID", &pid.to_string()])
             .creation_flags(CREATE_NO_WINDOW)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status();
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = Command::new("kill").args(["-9", &format!("-{pid}")]).status();
-        let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+        let _ = Command::new("kill")
+            .args(["-9", &format!("-{pid}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let _ = Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 }
 
@@ -394,6 +404,7 @@ pub fn run() {
             .center()
             .visible(false)
             .background_color(tauri::window::Color(24, 26, 33, 255))
+            .disable_drag_drop_handler()
             .devtools(false);
 
             #[cfg(target_os = "macos")]

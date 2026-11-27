@@ -29,7 +29,7 @@ import { mountExplorer } from "./presentation/views/explorerView";
 import { mountSourceControl } from "./presentation/views/sourceControlView";
 import { mountStatusBar } from "./presentation/views/statusBarView";
 import { mountTitlebar } from "./presentation/views/titlebarView";
-import { mountTabBar } from "./presentation/editor/tabBarView";
+import { mountEditorGroups } from "./presentation/editor/editorGroupsView";
 import { mountBottomPanel } from "./presentation/editor/bottomPanelView";
 import { mountSettingsModal } from "./presentation/editor/settingsModal";
 import { showContextMenu } from "./presentation/contextMenu";
@@ -53,7 +53,7 @@ const terminal = new NativeTerminal(); // Aquí invoca PowerShell en Win, zsh en
 const indexer = new WorkspaceIndexer(fs);
 let bottomPanel: ReturnType<typeof mountBottomPanel> | null = null;
 let statusBar: ReturnType<typeof mountStatusBar> | null = null;
-const editor = createCodeMirrorEditor($("editor"), {
+const editor = createCodeMirrorEditor({
   onChange: (path, content) => {
     store.dispatch({ type: "tab/dirty", path, dirty: true });
     indexer.updateFile(path, content);
@@ -83,7 +83,7 @@ const uc = createUseCases({ store, fs, dialogs, editor, terminal, indexer });
 mountTitlebar($("titlebar"), store);
 mountExplorer($("sidebar"), store, uc);
 mountSourceControl(store, uc, dialogs.error);
-mountTabBar($("tabbar"), store, uc);
+mountEditorGroups($("editor"), store, uc, editor);
 bottomPanel = mountBottomPanel(
   $("panel"),
   store,
@@ -228,7 +228,6 @@ function applySettings(s: Settings) {
 
 store.subscribe((s, p) => {
   if (s.rootPath !== p.rootPath) void lspClient.stopAll();
-  if (s.activePath !== p.activePath) editor.activate(s.activePath);
   if (s.settings !== p.settings) applySettings(s.settings);
   if (s.sidebarVisible !== p.sidebarVisible) {
     const appEl = $("app");

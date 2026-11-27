@@ -101,6 +101,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .chevron.open { transform: rotate(90deg); }
 .node-icon { display: grid; place-items: center; width: calc(var(--editor-font-size) * 1.05); height: calc(var(--editor-font-size) * 1.05); flex: none; }
 .tree-row.file .node-icon { color: var(--fg-muted); }
+.tree-row.dragging { opacity: 0.45; }
 .label { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .tree-empty { display: grid; gap: 10px; padding: 16px 12px; color: var(--fg-muted); }
 .tree-empty p { margin: 0; }
@@ -122,15 +123,117 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   font-size: calc(var(--ui-font-size) * 0.92); font-weight: 600; white-space: nowrap; cursor: pointer; flex: none;
 }
 .tab:hover { background: var(--hover-strong); color: var(--fg); }
-.tab.active { background: var(--surface); color: var(--fg); box-shadow: inset 0 0 0 1px var(--accent); }
-.tab.active:hover { background: var(--surface); color: var(--fg); box-shadow: inset 0 0 0 1px var(--accent); }
+.tab.active { background: var(--surface); color: var(--fg); box-shadow: inset 0 0 0 1px var(--border); }
+.tab.active.focused-tab { box-shadow: inset 0 0 0 1px var(--accent); }
+.tab.active:hover { background: var(--surface); color: var(--fg); }
+.tab.dragging { opacity: 0.45; }
+.tab.drop-before { box-shadow: inset 2px 0 0 var(--accent); }
+.tab.drop-after { box-shadow: inset -2px 0 0 var(--accent); }
+.tabs.tabbar-drop-hover { background: color-mix(in srgb, var(--accent) 10%, transparent); border-radius: 6px; }
 .tab-dirty { color: var(--accent); margin-left: 1px; align-self: flex-start; line-height: 18px; }
 .tab-close { width: 16px; height: 16px; margin-left: 10px; border-radius: 50%; font-size: 12px; line-height: 1; color: var(--fg-muted); }
 .tab-close:hover { background: var(--bg); color: var(--fg); }
 .tab-actions { display: flex; gap: 4px; }
 
-/* Editor */
-.editor-host { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; padding-top: 6px; }
+/* Acciones globales en Titlebar */
+.titlebar-right { display: flex; align-items: center; height: 100%; flex: none; }
+.titlebar-actions { display: flex; align-items: center; gap: 3px; padding: 0 6px; }
+.titlebar-actions .icon-btn { width: 22px; height: 22px; border-radius: 5px; }
+.titlebar-actions .icon-btn:hover, .titlebar-actions .icon-btn.on { background: var(--bg); color: var(--fg); }
+.titlebar-sep { width: 1px; height: 14px; background: var(--border); margin: 0 2px; }
+
+/* Editor Groups (árbol binario horizontal/vertical estilo VS Code) */
+.editor-host { display: flex; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
+.split-container { display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
+.split-container.vertical { flex-direction: row; }
+.split-container.horizontal { flex-direction: column; }
+.split-slot { display: flex; min-width: 0; min-height: 0; overflow: hidden; }
+.split-container.vertical > .split-first,
+.split-container.horizontal > .split-first {
+  flex: 0 0 calc(var(--split-ratio, 50%) - 5px);
+  min-width: 0;
+  min-height: 0;
+}
+.split-container.vertical > .split-second,
+.split-container.horizontal > .split-second {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+}
+
+.split-divider { flex: none; position: relative; background: transparent; }
+.split-container.vertical > .split-divider { width: 10px; cursor: col-resize; }
+.split-container.horizontal > .split-divider { height: 10px; cursor: row-resize; }
+.split-divider::after {
+  content: ""; position: absolute; border-radius: 999px;
+  background: var(--border); opacity: 0.65;
+  transition: background 140ms ease, opacity 140ms ease, width 140ms ease, height 140ms ease;
+}
+.split-container.vertical > .split-divider::after {
+  top: 50%; left: 50%; width: 3px; height: 34px; transform: translate(-50%, -50%);
+}
+.split-container.horizontal > .split-divider::after {
+  top: 50%; left: 50%; width: 34px; height: 3px; transform: translate(-50%, -50%);
+}
+.split-container.vertical > .split-divider:hover::after,
+.split-container.vertical > .split-divider.dragging::after {
+  width: 3px; height: 56px; opacity: 1; background: var(--accent);
+}
+.split-container.horizontal > .split-divider:hover::after,
+.split-container.horizontal > .split-divider.dragging::after {
+  width: 56px; height: 3px; opacity: 1; background: var(--accent);
+}
+
+.editor-group {
+  display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; overflow: hidden;
+  border-radius: var(--radius);
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+.editor-host.multi-group .editor-group {
+  background: var(--bg);
+  border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+}
+.editor-host.multi-group .editor-group.focused {
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--border));
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.group-tabbar {
+  display: flex; align-items: center; gap: 6px; min-height: 32px; padding: 2px 4px 4px 2px;
+  border-bottom: 1px solid var(--border); flex: none;
+}
+.editor-host.multi-group .editor-group > .group-tabbar {
+  padding: 4px 6px 4px 8px;
+  background: color-mix(in srgb, var(--surface) 48%, var(--bg));
+  border-bottom-color: color-mix(in srgb, var(--border) 75%, transparent);
+}
+.group-tab-actions { display: flex; align-items: center; gap: 2px; flex: none; }
+.group-tab-actions .icon-btn:disabled { opacity: 0.35; cursor: default; }
+.editor-group-body { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; padding-top: 6px; }
+.editor-host.multi-group .editor-group-body { padding: 4px 2px 2px; }
+.pane-surface { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; overflow: hidden; border-radius: calc(var(--radius) - 2px); }
+
+/* 5-Zone Drop Overlay */
+.editor-drop-overlay {
+  position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+  pointer-events: none; z-index: 25; border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border: 1.5px solid color-mix(in srgb, var(--accent) 52%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent);
+  transition: top 140ms cubic-bezier(0.22, 1, 0.36, 1),
+              left 140ms cubic-bezier(0.22, 1, 0.36, 1),
+              width 140ms cubic-bezier(0.22, 1, 0.36, 1),
+              height 140ms cubic-bezier(0.22, 1, 0.36, 1),
+              opacity 120ms ease;
+  will-change: top, left, width, height, opacity;
+}
+.editor-drop-overlay[data-zone="center"] { top: 0; left: 0; width: 100%; height: 100%; }
+.editor-drop-overlay[data-zone="left"] { top: 0; left: 0; width: 50%; height: 100%; }
+.editor-drop-overlay[data-zone="right"] { top: 0; left: 50%; width: 50%; height: 100%; }
+.editor-drop-overlay[data-zone="top"] { top: 0; left: 0; width: 100%; height: 50%; }
+.editor-drop-overlay[data-zone="bottom"] { top: 50%; left: 0; width: 100%; height: 50%; }
+:root[data-no-anim="true"] .editor-drop-overlay,
+:root[data-no-anim="true"] .editor-group,
+:root[data-no-anim="true"] .split-divider::after { transition: none; }
 .editor-host .cm-editor { flex: 1; min-height: 0; height: 100%; }
 .cm-ctrl-down .cm-content { cursor: pointer; }
 .cm-def-link,
