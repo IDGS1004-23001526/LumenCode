@@ -236,6 +236,18 @@ function isBenignJsxCommentError(doc: Text, ref: SyntaxNodeRef): boolean {
   return inner.length === 0;
 }
 
+function isBenignTsCatchTypeAnnotation(doc: Text, ref: SyntaxNodeRef, ext: string): boolean {
+  if (ext !== "ts" && ext !== "tsx" && ext !== "mts" && ext !== "cts") return false;
+  const parent = ref.node.parent;
+  if (!parent || parent.name !== "CatchClause") return false;
+  const snippet = doc.sliceString(ref.from, Math.min(ref.to, ref.from + 12)).trim();
+  if (snippet !== ":" && snippet !== "any" && snippet !== "unknown") return false;
+  const clauseHead = doc.sliceString(parent.from, Math.min(parent.to, parent.from + 120));
+  const m = /^catch\s*\(\s*[A-Za-z_$][\w$]*\s*:\s*(?:any|unknown)\s*\)/.exec(clauseHead);
+  if (!m) return false;
+  return ref.from >= parent.from && ref.to <= parent.from + m[0].length;
+}
+
 function describeSyntaxError(doc: Text, ref: SyntaxNodeRef, snippet: string): string {
   const parentName = ref.node.parent?.name ?? "";
   if (parentName === "JSXElement" || parentName === "JSXOpenTag" || parentName === "JSXCloseTag") {
@@ -390,6 +402,7 @@ function collectTreeDiagnostics(doc: Text, tree: Tree, ext: string): LumenDiagno
       if (errors.length >= 25) return false;
       if (!node.type.isError) return;
       if (isBenignJsxCommentError(doc, node)) return;
+      if (isBenignTsCatchTypeAnnotation(doc, node, ext)) return;
 
       // Si ya reportamos etiquetas JSX sin cerrar en su linea real, evita el error en cascada al final del archivo
       if (jsxErrors.length > 0 && node.from === node.to && node.from >= doc.length - 1) return;

@@ -5,7 +5,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 static NEXT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -60,20 +60,49 @@ struct LspClosedEvent {
     server_key: String,
 }
 
-fn spawn_candidate(program: &str, args: &[String], cwd: &str) -> std::io::Result<Child> {
+fn push_bin_candidates(cmd_names: &mut Vec<String>, bin_dir: &std::path::Path, program: &str) {
+    if !bin_dir.is_dir() {
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    if !program.contains('.') {
+        let cmd_path = bin_dir.join(format!("{program}.cmd"));
+        if cmd_path.is_file() {
+            cmd_names.push(cmd_path.to_string_lossy().into_owned());
+        }
+        let exe_path = bin_dir.join(format!("{program}.exe"));
+        if exe_path.is_file() {
+            cmd_names.push(exe_path.to_string_lossy().into_owned());
+        }
+    }
+    let plain = bin_dir.join(program);
+    if plain.is_file() {
+        cmd_names.push(plain.to_string_lossy().into_owned());
+    }
+}
+
+fn spawn_candidate(app: &AppHandle, program: &str, args: &[String], cwd: &str) -> std::io::Result<Child> {
     let mut cmd_names = Vec::new();
+
+    // 1. Prioridad: node_modules/.bin del proyecto abierto (si tiene su propia versión instalada)
     if !cwd.is_empty() {
-        let local_bin = std::path::Path::new(cwd).join("node_modules").join(".bin");
-        if local_bin.is_dir() {
-            #[cfg(target_os = "windows")]
-            if !program.contains('.') {
-                cmd_names.push(local_bin.join(format!("{program}.cmd")).to_string_lossy().into_owned());
-                cmd_names.push(local_bin.join(format!("{program}.exe")).to_string_lossy().into_owned());
-            }
-            cmd_names.push(local_bin.join(program).to_string_lossy().into_owned());
+        push_bin_candidates(&mut cmd_names, &std::path::Path::new(cwd).join("node_modules").join(".bin"), program);
+    }
+
+    // 2. Fallback integrado: node_modules/.bin de LumenCode (dev y producción)
+    if let Some(dev_root) = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent() {
+        push_bin_candidates(&mut cmd_names, &dev_root.join("node_modules").join(".bin"), program);
+    }
+    if let Ok(res_dir) = app.path().resource_dir() {
+        push_bin_candidates(&mut cmd_names, &res_dir.join("node_modules").join(".bin"), program);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        for ancestor in exe.ancestors().skip(1).take(4) {
+            push_bin_candidates(&mut cmd_names, &ancestor.join("node_modules").join(".bin"), program);
         }
     }
 
+    // 3. PATH global del sistema
     cmd_names.push(program.to_string());
     #[cfg(target_os = "windows")]
     if !program.contains('.') {
@@ -240,7 +269,7 @@ pub async fn lsp_start(
         }
 
         for (program, args) in candidates {
-            if let Ok(mut child) = spawn_candidate(&program, &args, &cwd) {
+            if let Ok(mut child) = spawn_candidate(&app, &program, &args, &cwd) {
                 let Some(stdin) = child.stdin.take() else {
                     let _ = child.kill();
                     let _ = child.wait();

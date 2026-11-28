@@ -144,14 +144,26 @@ export function createLspCompletionSource(
     }
 
     const word = ctx.matchBefore(/[A-Za-z_$][\w$]*/);
-    const dot = ctx.matchBefore(/(\.|::|->)$/);
-
-    if (!ctx.explicit && !word && !dot) return null;
-
     const lineObj = ctx.state.doc.lineAt(ctx.pos);
+    const linePrefix = lineObj.text.slice(0, ctx.pos - lineObj.from);
+    const memberTrigger = ctx.matchBefore(/(\.|::|->)$/);
+    const importSlashTrigger = /(?:from|import|require)\s*\(?[^'"`\n]*['"`][^'"`\n]*\/$/.test(linePrefix);
+    const atTrigger =
+      /(?:^|[\s;{(])@$/.test(linePrefix) ||
+      /^\s*\*.*@$/.test(linePrefix) ||
+      /(?:from|import|require)\s*\(?[^'"`\n]*['"`]@$/.test(linePrefix);
+    const triggerChar = memberTrigger
+      ? memberTrigger.text.slice(-1)
+      : importSlashTrigger
+        ? "/"
+        : atTrigger
+          ? "@"
+          : undefined;
+
+    if (!ctx.explicit && !word && !triggerChar) return null;
+
     const line = lineObj.number - 1;
     const character = ctx.pos - lineObj.from;
-    const triggerChar = dot ? dot.text.slice(-1) : undefined;
 
     const lspItems = await lspClient.complete(activePath, line, character, triggerChar);
     if (!lspItems || lspItems.length === 0) {

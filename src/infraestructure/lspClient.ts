@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { normalizePath, parentDirOf, pathsEqual } from "../domain/path";
+import { fileNameOf, normalizePath, parentDirOf, pathsEqual } from "../domain/path";
 import { lspSpecFor, type LspServerSpec } from "../presentation/editor/languages";
 
 export interface LspTextEdit {
@@ -75,7 +75,8 @@ interface OpenDoc {
 }
 
 const IDLE_SHUTDOWN_MS = 15_000;
-const REQUEST_TIMEOUT_MS = 1_200;
+const REQUEST_TIMEOUT_MS = 4_000;
+const INITIALIZE_TIMEOUT_MS = 15_000;
 
 export function pathToUri(path: string): string {
   const normalized = path.replace(/\\/g, "/");
@@ -162,10 +163,25 @@ class LspClientManager {
           };
           if (msg.id !== undefined && typeof msg.method === "string") {
             // Petición servidor -> cliente (ej. workspace/configuration, client/registerCapability)
-            const rawItems = (msg.params as { items?: unknown[] } | undefined)?.items;
+            const rawItems = (msg.params as { items?: Array<{ section?: string }> } | undefined)?.items;
             const result =
               msg.method === "workspace/configuration"
-                ? (Array.isArray(rawItems) ? rawItems.map(() => null) : [])
+                ? (Array.isArray(rawItems)
+                  ? rawItems.map((it) => {
+                      const sec = it?.section ?? "";
+                      if (sec === "typescript" || sec === "javascript") {
+                        return {
+                          suggest: { autoImports: true, completeFunctionCalls: false },
+                          preferences: {
+                            importModuleSpecifier: "shortest",
+                            quoteStyle: "auto",
+                            includePackageJsonAutoImports: "auto",
+                          },
+                        };
+                      }
+                      return {};
+                    })
+                  : [])
                 : null;
             const reply = JSON.stringify({ jsonrpc: "2.0", id: msg.id, result });
             void invoke("lsp_send", { serverKey: session.serverKey, payload: reply }).catch(() => {});
@@ -264,10 +280,31 @@ class LspClientManager {
         const rootUri = rootPath ? pathToUri(rootPath) : null;
         await this.sendRequest(session, "initialize", {
           processId: null,
+          clientInfo: { name: "LumenCode", version: "0.5.0" },
           rootUri,
+          workspaceFolders: rootUri ? [{ uri: rootUri, name: fileNameOf(rootPath) || "workspace" }] : null,
+          initializationOptions:
+            spec.serverKey === "typescript"
+              ? {
+                  hostInfo: "LumenCode",
+                  preferences: {
+                    includeCompletionsForModuleExports: true,
+                    includeCompletionsWithInsertText: true,
+                    includeAutomaticOptionalChainCompletions: true,
+                    importModuleSpecifierPreference: "shortest",
+                    quotePreference: "auto",
+                  },
+                }
+              : undefined,
           capabilities: {
+            workspace: {
+              workspaceFolders: true,
+              configuration: true,
+            },
             textDocument: {
               synchronization: { dynamicRegistration: false, didSave: true },
+              publishDiagnostics: { relatedInformation: true, versionSupport: false },
+              definition: { linkSupport: true },
               completion: {
                 completionItem: {
                   snippetSupport: false,
@@ -280,7 +317,7 @@ class LspClientManager {
               hover: { contentFormat: ["markdown", "plaintext"] },
             },
           },
-        }, 4_000);
+        }, INITIALIZE_TIMEOUT_MS);
 
         if (gen !== this.generation || this.sessions.get(spec.serverKey) !== session) {
           void invoke("lsp_stop", { serverKey: spec.serverKey }).catch(() => {});
@@ -316,6 +353,7 @@ class LspClientManager {
       } catch {
         if (this.sessions.get(spec.serverKey) === session) {
           this.cleanupSession(spec.serverKey);
+          void invoke("lsp_stop", { serverKey: spec.serverKey }).catch(() => {});
         }
         return false;
       }
@@ -406,6 +444,35 @@ class LspClientManager {
     });
   }
 
+  private flushDocument(path: string): void {
+    const doc = this.openDocs.get(path);
+    if (!doc || !doc.changeTimer) return;
+    clearTimeout(doc.changeTimer);
+    doc.changeTimer = null;
+    const session = this.sessions.get(doc.serverKey);
+    const meta = this.openTabMeta.get(path);
+    if (!session || !session.initialized || !meta) return;
+    doc.version += 1;
+    this.sendNotification(session, "textDocument/didChange", {
+      textDocument: { uri: doc.uri, version: doc.version },
+      contentChanges: [{ text: meta.text }],
+    });
+  }
+
+  saveDocument(path: string, text?: string): void {
+    const meta = this.openTabMeta.get(path);
+    if (meta && text !== undefined) meta.text = text;
+    this.flushDocument(path);
+    const doc = this.openDocs.get(path);
+    if (!doc) return;
+    const session = this.sessions.get(doc.serverKey);
+    if (!session || !session.initialized) return;
+    this.sendNotification(session, "textDocument/didSave", {
+      textDocument: { uri: doc.uri },
+      ...(text !== undefined ? { text } : {}),
+    });
+  }
+
   changeDocument(path: string, text: string): void {
     const meta = this.openTabMeta.get(path);
     if (meta) meta.text = text;
@@ -468,6 +535,7 @@ class LspClientManager {
     character: number,
     triggerCharacter?: string,
   ): Promise<LspCompletionItem[] | null> {
+    this.flushDocument(path);
     const doc = this.openDocs.get(path);
     if (!doc) return null;
     const session = this.sessions.get(doc.serverKey);
@@ -499,13 +567,14 @@ class LspClientManager {
     if (!session || !session.initialized) return null;
 
     try {
-      return await this.sendRequest<LspCompletionItem | null>(session, "completionItem/resolve", item, 800);
+      return await this.sendRequest<LspCompletionItem | null>(session, "completionItem/resolve", item, 2_000);
     } catch {
       return null;
     }
   }
 
   async hover(path: string, line: number, character: number): Promise<string | null> {
+    this.flushDocument(path);
     const doc = this.openDocs.get(path);
     if (!doc) return null;
     const session = this.sessions.get(doc.serverKey);
@@ -524,6 +593,7 @@ class LspClientManager {
   }
 
   async definition(path: string, line: number, character: number): Promise<LspLocation | null> {
+    this.flushDocument(path);
     const doc = this.openDocs.get(path);
     if (!doc) return null;
     const session = this.sessions.get(doc.serverKey);
