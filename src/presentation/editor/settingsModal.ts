@@ -705,7 +705,7 @@ export function mountSettingsModal(store: AppStore) {
                 "div",
                 { class: "credits-title-row" },
                 h("span", { class: "credits-name" }, "LumenCode"),
-                h("span", { class: "credits-pill" }, "v0.5.1"),
+                h("span", { class: "credits-pill" }, "v0.6.1"),
               ),
               h(
                 "div",
