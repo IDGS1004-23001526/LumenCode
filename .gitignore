@@ -8,4 +8,8 @@ rustup-init.exe
 .env
 .env.local
 .env.*.local
+*.key
+*.key.pub
+.tauri/
+tauri-signing*
 Thumbs.db

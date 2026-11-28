@@ -1,5 +1,5 @@
 import type { GitStatus } from "../domain/git";
-import type { AppState, DropZone, FileNode, PanelView, Settings } from "../domain/types";
+import type { AppState, DropZone, FileNode, PanelView, Settings, UpdateState } from "../domain/types";
 import {
   activateTabInGroup,
   createInitialLayout,
@@ -41,7 +41,8 @@ export type Action =
   | { type: "git/open"; open: boolean }
   | { type: "git/status"; status: GitStatus | null }
   | { type: "settings/open"; open: boolean }
-  | { type: "settings/update"; patch: Partial<Settings> };
+  | { type: "settings/update"; patch: Partial<Settings> }
+  | { type: "update/state"; state: UpdateState };
 
 export type AppStore = Store<AppState, Action>;
 
@@ -62,6 +63,7 @@ export const initialState = (settings: Settings): AppState => {
     settingsOpen: false,
     settings,
     git: null,
+    update: { phase: "idle", version: null, progress: 0 },
   };
 };
 
@@ -196,5 +198,14 @@ export function reducer(s: AppState, a: Action): AppState {
       return s.settingsOpen === a.open ? s : { ...s, settingsOpen: a.open };
     case "settings/update":
       return { ...s, settings: { ...s.settings, ...a.patch } };
+    case "update/state":
+      if (
+        s.update.phase === a.state.phase &&
+        s.update.version === a.state.version &&
+        s.update.progress === a.state.progress
+      ) {
+        return s;
+      }
+      return { ...s, update: a.state };
   }
 }

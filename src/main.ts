@@ -18,6 +18,7 @@ import { localSettingsRepository } from "./infraestructure/localSettingsReposito
 import { findTheme } from "./infraestructure/themeRepository";
 import { findIconTheme } from "./infraestructure/iconThemeRepository";
 import { lspClient } from "./infraestructure/lspClient";
+import { updaterClient } from "./infraestructure/updaterClient";
 import { animateLayoutWithPanel, setAnimationsEnabled } from "./presentation/animate";
 
 import { createCodeMirrorEditor } from "./presentation/editor/codemirrorEditor";
@@ -80,7 +81,24 @@ const editor = createCodeMirrorEditor({
 const uc = createUseCases({ store, fs, dialogs, editor, terminal, indexer });
 
 // Vistas
-mountTitlebar($("titlebar"), store);
+mountTitlebar($("titlebar"), store, () => {
+  void updaterClient.installAndRestart({
+    beforeInstall: async () => {
+      const dirty = store.getState().tabs.some((t) => t.dirty);
+      if (dirty) {
+        const ok = await dialogs.confirm(
+          "Hay archivos con cambios sin guardar. ¿Reiniciar y actualizar de todos modos?",
+          "Reiniciar y actualizar",
+        );
+        if (!ok) return false;
+      }
+      await Promise.allSettled([terminal.kill(), lspClient.stopAll()]);
+      return true;
+    },
+    onError: (msg) => dialogs.error(msg),
+  });
+});
+updaterClient.start((state) => store.dispatch({ type: "update/state", state }));
 mountExplorer($("sidebar"), store, uc);
 mountSourceControl(store, uc, dialogs.error);
 mountEditorGroups($("editor"), store, uc, editor);

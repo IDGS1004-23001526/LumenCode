@@ -13,7 +13,9 @@ const WIN_ICONS = {
   close: `<svg width="10" height="10" viewBox="0 0 10 10"><path d="M1.5 1.5l7 7M8.5 1.5l-7 7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>`,
 };
 
-export function mountTitlebar(el: HTMLElement, store: AppStore) {
+const UPDATE_ICON_SVG = `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 8a5.5 5.5 0 1 1-1.4-3.7"/><path d="M13.5 2.8v2.7h-2.7"/></svg>`;
+
+export function mountTitlebar(el: HTMLElement, store: AppStore, onInstallUpdate?: () => void) {
   const appWin = getCurrentWindow();
   const isMac = /Mac/i.test(navigator.platform || navigator.userAgent);
   if (isMac) el.classList.add("is-mac");
@@ -33,6 +35,26 @@ export function mountTitlebar(el: HTMLElement, store: AppStore) {
     titleEl,
   );
 
+  // Botón adaptativo de actualización automática (Descargando con progressbar -> Reiniciar para actualizar)
+  const updateFill = h("span", { class: "titlebar-update-fill", "aria-hidden": "true" });
+  const updateIcon = h("span", { class: "titlebar-update-icon", "aria-hidden": "true" });
+  updateIcon.innerHTML = UPDATE_ICON_SVG;
+  const updateLabel = h("span", { class: "titlebar-update-label" });
+  const updateBtn = h(
+    "button",
+    {
+      class: "titlebar-update-btn",
+      hidden: true,
+      onclick: () => {
+        if (store.getState().update.phase === "ready") {
+          onInstallUpdate?.();
+        }
+      },
+    },
+    updateFill,
+    h("span", { class: "titlebar-update-content" }, updateIcon, updateLabel),
+  ) as HTMLButtonElement;
+
   // Acciones globales del workbench (Git, Terminal/Panel, Configuración)
   const gitBadge = h("span", { class: "git-trigger-badge", hidden: true }, "0");
   const gitBtn = iconButton(ICONS.git, "Source Control (Ctrl+Shift+G)", () => store.dispatch({ type: "git/toggle" }));
@@ -41,7 +63,7 @@ export function mountTitlebar(el: HTMLElement, store: AppStore) {
   gitBtn.append(gitBadge);
   const panelBtn = iconButton(ICONS.panel, "Mostrar/ocultar panel (Ctrl+`)", () => store.dispatch({ type: "panel/toggle" }));
   const gearBtn = iconButton(ICONS.gear, "Configuración (Ctrl + ,)", () => store.dispatch({ type: "settings/open", open: true }));
-  const actions = h("div", { class: "titlebar-actions" }, gitBtn, panelBtn, gearBtn);
+  const actions = h("div", { class: "titlebar-actions" }, updateBtn, gitBtn, panelBtn, gearBtn);
 
   const mkBtn = (svg: string, title: string, cls: string, onclick: () => void) => {
     const btn = h("button", { class: `titlebar-btn ${cls}`, title, onclick });
@@ -76,6 +98,28 @@ export function mountTitlebar(el: HTMLElement, store: AppStore) {
     const count = s.git?.is_repo ? s.git.entries.length : 0;
     gitBadge.hidden = count === 0;
     gitBadge.textContent = count > 99 ? "99+" : String(count);
+
+    const u = s.update;
+    updateBtn.hidden = u.phase === "idle";
+    if (u.phase !== "idle") {
+      updateBtn.dataset.phase = u.phase;
+      updateBtn.disabled = u.phase !== "ready";
+      const isIndeterminate = u.phase === "downloading" && u.progress < 0;
+      updateBtn.classList.toggle("indeterminate", isIndeterminate);
+      const pct = Math.max(0, Math.min(100, u.progress));
+      updateBtn.style.setProperty("--update-progress", `${pct}%`);
+      const verSuffix = u.version ? ` v${u.version}` : "";
+      if (u.phase === "downloading") {
+        updateLabel.textContent = isIndeterminate ? "Descargando..." : `Descargando ${pct}%`;
+        updateBtn.title = `Descargando actualización${verSuffix}...`;
+      } else if (u.phase === "ready") {
+        updateLabel.textContent = "Reiniciar para actualizar";
+        updateBtn.title = `Instalar LumenCode${verSuffix} y reiniciar`;
+      } else {
+        updateLabel.textContent = "Instalando...";
+        updateBtn.title = `Instalando LumenCode${verSuffix}...`;
+      }
+    }
   };
 
   update(store.getState());
@@ -86,7 +130,8 @@ export function mountTitlebar(el: HTMLElement, store: AppStore) {
       s.tabs !== p.tabs ||
       s.panelVisible !== p.panelVisible ||
       s.gitOpen !== p.gitOpen ||
-      s.git !== p.git
+      s.git !== p.git ||
+      s.update !== p.update
     ) {
       update(s);
     }
