@@ -3,6 +3,7 @@ import type { DropZone, FileNode } from "../domain/types";
 import { getAllGroups, getVisiblePaths } from "../domain/editorLayout";
 import { hasFileExtension, imageMimeFor, isImageFile, isTextFile, isValidName, joinPath, normalizePath, parentDirOf, pathsEqual } from "../domain/path";
 import { gitClient } from "../infraestructure/gitClient";
+import { lspClient } from "../infraestructure/lspClient";
 import type { AppStore } from "./reducer";
 import type { DialogPort, EditorPort, FileSystemPort, TerminalPort } from "./ports";
 import type { WorkspaceIndexer } from "./workspaceIndexer";
@@ -222,6 +223,7 @@ export function createUseCases({ store, fs, dialogs, editor, terminal, indexer }
     try {
       const content = editor.getText(path);
       await fs.writeText(path, content);
+      lspClient.saveDocument(path, content);
       indexer.updateFile(path, content);
       store.dispatch({ type: "tab/dirty", path, dirty: false });
       scheduleGitRefresh();

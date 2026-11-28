@@ -337,7 +337,7 @@ export function mountBottomPanel(
             }
             problemsByFile.clear();
             for (const [path, diags] of diagsByFile) {
-                if (diags.length > 0 && !preservedLsp.has(path)) {
+                if (diags.length > 0 && !preservedLsp.has(path) && !lspClient.hasActiveServerFor(path)) {
                     problemsByFile.set(path, diags);
                 }
             }
