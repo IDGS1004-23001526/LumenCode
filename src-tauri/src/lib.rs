@@ -392,7 +392,10 @@ pub fn run() {
         .manage(lsp::LspRegistry::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
             let builder = tauri::WebviewWindowBuilder::new(
                 app,
                 "main",

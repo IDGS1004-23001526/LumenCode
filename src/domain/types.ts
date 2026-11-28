@@ -19,6 +19,14 @@ export type PanelView = "problems" | "output" | "debug" | "terminal";
 export type CursorBlinking = "blink" | "smooth" | "phase" | "expand" | "solid";
 export type SplitDirection = "vertical" | "horizontal";
 export type DropZone = "left" | "right" | "top" | "bottom" | "center";
+export type UpdatePhase = "idle" | "downloading" | "ready" | "installing";
+
+export interface UpdateState {
+    phase: UpdatePhase;
+    version: string | null;
+    /** 0..100 para progreso determinístico; -1 si no se conoce el tamaño total. */
+    progress: number;
+}
 
 export interface EditorGroupNode {
     kind: "group";
@@ -107,6 +115,7 @@ export interface AppState {
     settingsOpen: boolean;
     settings: Settings;
     git: GitStatus | null;
+    update: UpdateState;
 }
 
 export const DEFAULT_SETTINGS: Settings = {

@@ -137,10 +137,88 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 
 /* Acciones globales en Titlebar */
 .titlebar-right { display: flex; align-items: center; height: 100%; flex: none; }
-.titlebar-actions { display: flex; align-items: center; gap: 3px; padding: 0 6px; }
+.titlebar-actions { display: flex; align-items: center; gap: 4px; padding: 0 6px; }
 .titlebar-actions .icon-btn { width: 22px; height: 22px; border-radius: 5px; }
 .titlebar-actions .icon-btn:hover, .titlebar-actions .icon-btn.on { background: var(--bg); color: var(--fg); }
 .titlebar-sep { width: 1px; height: 14px; background: var(--border); margin: 0 2px; }
+
+/* Botón adaptativo de actualización con progressbar integrado */
+.titlebar-update-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 9px;
+  margin-right: 4px;
+  border-radius: 999px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 52%, var(--border));
+  background: color-mix(in srgb, var(--bg) 85%, var(--surface));
+  color: var(--fg);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease, transform 120ms ease;
+}
+.titlebar-update-btn:disabled { cursor: default; }
+.titlebar-update-btn[data-phase="ready"] {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.titlebar-update-btn[data-phase="ready"]:hover {
+  background: color-mix(in srgb, var(--accent) 28%, var(--bg));
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.titlebar-update-btn[data-phase="ready"]:active { transform: scale(0.98); }
+.titlebar-update-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--update-progress, 0%);
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  pointer-events: none;
+  transition: width 160ms linear;
+}
+.titlebar-update-btn[data-phase="ready"] .titlebar-update-fill,
+.titlebar-update-btn[data-phase="installing"] .titlebar-update-fill {
+  opacity: 0;
+}
+.titlebar-update-btn.indeterminate .titlebar-update-fill {
+  width: 42%;
+  animation: lumen-update-indeterminate 1.25s ease-in-out infinite;
+}
+.titlebar-update-content {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.titlebar-update-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--accent);
+  flex: none;
+}
+.titlebar-update-btn[data-phase="downloading"] .titlebar-update-icon,
+.titlebar-update-btn[data-phase="installing"] .titlebar-update-icon {
+  animation: lumen-update-spin 1.4s linear infinite;
+}
+@keyframes lumen-update-indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(260%); }
+}
+@keyframes lumen-update-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+:root[data-no-anim="true"] .titlebar-update-fill,
+:root[data-no-anim="true"] .titlebar-update-icon {
+  animation: none;
+  transition: none;
+}
 
 /* Editor Groups (árbol binario horizontal/vertical estilo VS Code) */
 .editor-host { display: flex; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
